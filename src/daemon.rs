@@ -562,14 +562,14 @@ impl Daemon {
             .collect())
     }
 
-    fn get_all_headers(&self, tip: &BlockHash) -> Result<Vec<BlockHeader>> {
+    fn get_all_headers(&self, from_height: usize, from_tip: &BlockHash, tip: &BlockHash) -> Result<Vec<BlockHeader>> {
         let info: Value = self.request("getblockheader", json!([tip]))?;
         let tip_height = info
             .get("height")
             .expect("missing height")
             .as_u64()
             .expect("non-numeric height") as usize;
-        let all_heights: Vec<usize> = (0..=tip_height).collect();
+        let all_heights: Vec<usize> = (from_height..=tip_height).collect();
         let chunk_size = 100_000;
         let mut result = vec![];
         for heights in all_heights.chunks(chunk_size) {
@@ -579,7 +579,7 @@ impl Daemon {
             result.append(&mut headers);
         }
 
-        let mut blockhash = *DEFAULT_BLOCKHASH;
+        let mut blockhash = *from_tip;
         for header in &result {
             assert_eq!(header.prev_blockhash, blockhash);
             blockhash = header.block_hash();
@@ -597,28 +597,14 @@ impl Daemon {
         // Iterate back over headers until known blockash is found:
         if indexed_headers.is_empty() {
             debug!("downloading all block headers up to {}", bestblockhash);
-            return self.get_all_headers(bestblockhash);
+            return self.get_all_headers(0, &*DEFAULT_BLOCKHASH, bestblockhash);
         }
         debug!(
-            "downloading new block headers ({} already indexed) from {}",
+            "downloading new block headers ({} already indexed) upto {}",
             indexed_headers.len(),
             bestblockhash,
         );
-        let mut new_headers = vec![];
-        let mut blockhash = *bestblockhash;
-        while blockhash != *DEFAULT_BLOCKHASH {
-            if indexed_headers.header_by_blockhash(&blockhash).is_some() {
-                break;
-            }
-            let header = self
-                .getblockheader(&blockhash)
-                .chain_err(|| format!("failed to get {} header", blockhash))?;
-            blockhash = header.prev_blockhash;
-            new_headers.push(header);
-        }
-        trace!("downloaded {} block headers", new_headers.len());
-        new_headers.reverse(); // so the tip is the last vector entry
-        Ok(new_headers)
+        return self.get_all_headers(indexed_headers.len(), indexed_headers.tip(), bestblockhash);
     }
 
     pub fn get_relayfee(&self) -> Result<f64> {
