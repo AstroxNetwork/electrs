@@ -62,6 +62,9 @@ impl RunesDB {
             TRANSACTION_ID_TO_RUNE,
             RUNE_ID_HEIGHT_TO_MINTS,
             RUNE_ID_HEIGHT_TO_BURNED,
+            RUNE_ID_TO_NUMBER,
+            RUNE_ID_TO_MINTS,
+            RUNE_ID_TO_BURNED,
         ];
         let cf_descriptors: Vec<_> = cf_names.iter()
             .map(|name| ColumnFamilyDescriptor::new(*name, Options::default()))
