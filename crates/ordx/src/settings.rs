@@ -13,6 +13,11 @@ pub struct Settings {
     pub bitcoin_rpc_username: Option<String>,
     pub bitcoin_rpc_password: Option<String>,
     pub max_block_queue_size: Option<u8>,
+    // server
+    pub api_host: String,
+    pub ip_limit_per_mills: u64,
+    pub ip_limit_burst_size: u32,
+    pub concurrency_limit: usize,
 }
 
 impl Display for Settings {
@@ -25,6 +30,10 @@ impl Display for Settings {
         bitcoin_rpc_username: {}\n\
         bitcoin_rpc_password: {} \n\
         max_block_queue_size: {}\n\
+        api_host: {}\n\
+        ip_limit_per_mills: {}\n\
+        ip_limit_burst_size: {}\n\
+        concurrency_limit: {}\n\
         build_version: {}\n\
         build_timestamp: {}\n\
         target_triple: {}\n\
@@ -36,6 +45,10 @@ impl Display for Settings {
                self.bitcoin_rpc_username.as_ref().map(|_| "***").unwrap_or_default(),
                self.bitcoin_rpc_password.as_ref().map(|_| "********").unwrap_or_default(),
                self.max_block_queue_size.map(|x| x.to_string()).unwrap_or_default(),
+               self.api_host,
+               self.ip_limit_per_mills,
+               self.ip_limit_burst_size,
+               self.concurrency_limit,
                env!("CARGO_PKG_VERSION"),
                env!("VERGEN_BUILD_TIMESTAMP"),
                env!("VERGEN_CARGO_TARGET_TRIPLE"),

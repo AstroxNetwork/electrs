@@ -128,11 +128,11 @@ impl FromStr for Chain {
 
     fn from_str(s: &str) -> Result<Self, Self::Err> {
         match s {
-            "mainnet" => Ok(Self::Mainnet),
+            "mainnet" | "main" => Ok(Self::Mainnet),
             "regtest" => Ok(Self::Regtest),
             "signet" => Ok(Self::Signet),
-            "testnet" => Ok(Self::Testnet),
-            "testnet4" => Ok(Self::Testnet4),
+            "testnet" | "test" => Ok(Self::Testnet),
+            "testnet4" | "test4" => Ok(Self::Testnet4),
             _ => bail!("invalid chain `{s}`"),
         }
     }

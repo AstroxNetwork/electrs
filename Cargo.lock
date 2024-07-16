@@ -352,6 +352,7 @@ version = "0.31.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "6c85783c2fe40083ea54a33aa2f0ba58831d90fcd190f5bdc47e74e84d2a96ae"
 dependencies = [
+ "base64 0.21.7",
  "bech32 0.10.0-beta",
  "bitcoin-internals 0.2.0",
  "bitcoin_hashes 0.13.0",
@@ -859,9 +860,9 @@ dependencies = [
 
 [[package]]
 name = "darling"
-version = "0.20.9"
+version = "0.20.10"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "83b2eb4d90d12bdda5ed17de686c2acb4c57914f8f921b8da7e112b5a36f3fe1"
+checksum = "6f63b86c8a8826a49b8c21f08a2d07338eec8d900540f8630dc76284be802989"
 dependencies = [
  "darling_core",
  "darling_macro",
@@ -869,9 +870,9 @@ dependencies = [
 
 [[package]]
 name = "darling_core"
-version = "0.20.9"
+version = "0.20.10"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "622687fe0bac72a04e5599029151f5796111b90f1baaa9b544d807a5e31cd120"
+checksum = "95133861a8032aaea082871032f5815eb9e98cef03fa916ab4500513994df9e5"
 dependencies = [
  "fnv",
  "ident_case",
@@ -883,9 +884,9 @@ dependencies = [
 
 [[package]]
 name = "darling_macro"
-version = "0.20.9"
+version = "0.20.10"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "733cabb43482b1a1b53eee8583c2b9e8684d592215ea83efd305dd31bc2f0178"
+checksum = "d336a2a514f6ccccaa3e09b02d41d35330c07ddf03a62165fcec10bb561c7806"
 dependencies = [
  "darling_core",
  "quote",
@@ -2071,7 +2072,7 @@ dependencies = [
 
 [[package]]
 name = "ordinals"
-version = "0.0.8"
+version = "0.0.9"
 dependencies = [
  "anyhow",
  "bitcoin 0.31.2",
@@ -2085,9 +2086,11 @@ dependencies = [
 
 [[package]]
 name = "ordx"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "anyhow",
+ "axum",
+ "base64 0.22.1",
  "bincode",
  "bitcoin 0.31.2",
  "bitcoincore-rpc 0.18.0",
@@ -2095,30 +2098,13 @@ dependencies = [
  "config",
  "dotenv",
  "env_logger",
+ "forwarded-header-value",
+ "hex",
+ "http-body-util",
  "itertools 0.13.0",
  "log",
  "ordinals",
  "rocksdb",
- "serde",
- "serde_derive",
- "serde_json",
- "tokio",
- "vergen",
-]
-
-[[package]]
-name = "ordx-api"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "axum",
- "bitcoin 0.32.2",
- "config",
- "dotenv",
- "env_logger",
- "forwarded-header-value",
- "log",
- "ordx",
  "serde",
  "serde_derive",
  "serde_json",
@@ -2896,9 +2882,9 @@ dependencies = [
 
 [[package]]
 name = "serde_with"
-version = "3.8.2"
+version = "3.9.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "079f3a42cd87588d924ed95b533f8d30a483388c4e400ab736a7058e34f16169"
+checksum = "69cecfa94848272156ea67b2b1a53f20fc7bc638c4a46d2f8abde08f05f4b857"
 dependencies = [
  "base64 0.22.1",
  "chrono",
@@ -2914,9 +2900,9 @@ dependencies = [
 
 [[package]]
 name = "serde_with_macros"
-version = "3.8.2"
+version = "3.9.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "bc03aad67c1d26b7de277d51c86892e7d9a0110a2fe44bf6b26cc569fba302d6"
+checksum = "a8fee4991ef4f274617a51ad4af30519438dacb2f56ac773b08a1922ff743350"
 dependencies = [
  "darling",
  "proc-macro2",

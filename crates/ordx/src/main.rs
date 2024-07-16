@@ -1,5 +1,6 @@
 use std::cmp::max;
 use std::collections::HashMap;
+use std::sync::Arc;
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::thread;
 use std::time::{Duration, Instant};
@@ -11,6 +12,7 @@ use bitcoincore_rpc::RpcApi;
 use log::{info, warn};
 
 use ordinals::{Height, Rune, RuneId, SpacedRune, Terms};
+use ordx::api::create_server;
 use ordx::chain::Chain;
 use ordx::db::RunesDB;
 use ordx::entry::{RuneEntry, Statistic};
@@ -19,15 +21,22 @@ use ordx::settings::Settings;
 use ordx::updater::RuneUpdater;
 
 #[tokio::main]
-async fn main() {
-    let settings = Settings::load();
+async fn main() -> anyhow::Result<()> {
+    let settings = Arc::new(Settings::load());
     env_logger::init();
     info!("{}", &settings);
-    let (rpc_client, chain) = create_bitcoincore_rpc_client(&settings).unwrap();
-    let db_path = chain.join_with_data_dir(settings.data_dir.unwrap_or("./index".to_string()).as_str());
-    info!("Using rocksdb at {:?}", db_path);
-    let runes_db = RunesDB::new(db_path);
+    let (rpc_client, chain) = create_bitcoincore_rpc_client(settings.clone()).unwrap();
 
+
+    let db_path = chain.join_with_data_dir(settings.data_dir.clone().unwrap_or("./index".to_string()).as_str());
+    info!("Using rocksdb at {:?}", db_path);
+    let runes_db = Arc::new(RunesDB::new(db_path));
+
+    let server_db = Arc::clone(&runes_db);
+    let server_settings = Arc::clone(&settings);
+    tokio::spawn(async move {
+        create_server(server_settings, server_db).await.unwrap();
+    });
     // Create the first rune if it doesn't exist
     if chain == Chain::Mainnet {
         let id = RuneId { block: 1, tx: 0 };
@@ -58,7 +67,6 @@ async fn main() {
                 timestamp: 0,
                 turbo: true,
             });
-            runes_db.transaction_id_to_rune_put(&etching, &rune);
         }
     }
 
@@ -80,44 +88,26 @@ async fn main() {
     loop {
         let index_timestamp = Instant::now();
         let block = with_retry(|| {
-            let latest_height: u32 = {
-                match rpc_client.get_block_count() {
-                    Ok(v) => v as _,
-                    Err(e) => return Err(e.into())
-                }
-            };
+            let latest_height: u32 = rpc_client.get_block_count()? as _;
+            runes_db.statistic_to_value_put(&Statistic::LatestHeight, latest_height);
             let h = index_height.load(Ordering::Relaxed);
             if latest_height < h {
                 thread::sleep(Duration::from_secs(1));
                 return Ok(None);
             }
 
-            let block_hash = {
-                match rpc_client.get_block_hash(h.into()) {
-                    Ok(v) => v,
-                    Err(e) => return Err(e.into())
-                }
-            };
+            let block_hash = rpc_client.get_block_hash(h.into())?;
+            let block = rpc_client.get_block(&block_hash)?;
 
-            let block = {
-                match rpc_client.get_block(&block_hash) {
-                    Ok(v) => v,
-                    Err(e) => return Err(e.into())
-                }
-            };
             let bitcoind_prev_blockhash = block.header.prev_blockhash;
             let mut prev_height = h - 1;
             let mut first_check = true;
             loop {
                 if prev_height > first_rune_height {
-                    let header = {
-                        runes_db.height_to_block_header_get(prev_height)
-                    };
+                    let header = runes_db.height_to_block_header_get(prev_height);
                     match header {
                         None => {
-                            let sh = {
-                                runes_db.latest_indexed_height().unwrap_or(first_rune_height)
-                            };
+                            let sh = runes_db.latest_indexed_height().unwrap_or(first_rune_height);
                             let to_height = sh.max(first_rune_height);
                             index_height.store(to_height, Ordering::Relaxed);
                             reorg_height.store(to_height, Ordering::Relaxed);
@@ -133,12 +123,7 @@ async fn main() {
                                     prev_height = max(first_rune_height, prev_height - 1);
                                 }
                             } else {
-                                let block_hash = {
-                                    match rpc_client.get_block_hash(prev_height.into()) {
-                                        Ok(v) => v,
-                                        Err(e) => return Err(e.into())
-                                    }
-                                };
+                                let block_hash = rpc_client.get_block_hash(prev_height.into())?;
                                 if block_hash == v.block_hash() {
                                     let to_height = prev_height + 1;
                                     index_height.store(max(first_rune_height, to_height), Ordering::Relaxed);
@@ -166,13 +151,13 @@ async fn main() {
                     }
                     warn!("Reorg detected, resetting to height: {}", curr_reorg_height);
                     let start = Instant::now();
-                    runes_db.reorg_to_height(curr_reorg_height - 1);
+                    runes_db.reorg_to_height(curr_reorg_height);
                     let elapsed = start.elapsed();
                     warn!("Reorg done, {:?}", elapsed);
                     reorg_height.store(0, Ordering::Relaxed);
                 }
                 let updater_timestamp = Instant::now();
-                let runes_num_before = runes_db.height_to_statistic_count_sum_to_height(&Statistic::Runes, block_height);
+                let runes_num_before = runes_db.statistic_to_value_get(&Statistic::Runes).unwrap_or_default();
                 let mut rune_updater = RuneUpdater {
                     block_time: block.header.time,
                     burned: HashMap::new(),

@@ -1,6 +1,6 @@
 use std::path::Path;
 
-use bitcoin::{OutPoint, ScriptBuf, Txid};
+use bitcoin::{OutPoint, ScriptBuf};
 use bitcoin::block::Header;
 use itertools::Itertools;
 use rocksdb::{ColumnFamily, ColumnFamilyDescriptor, DB, Error, IteratorMode, Options, WriteBatch};
@@ -16,53 +16,37 @@ pub struct RunesDB {
 
 pub const HEIGHT_TO_BLOCK_HEADER: &str = "HEIGHT_TO_BLOCK_HEADER";
 pub const HEIGHT_TO_STATISTIC_COUNT: &str = "HEIGHT_TO_STATISTIC_COUNT";
+pub const STATISTIC_TO_VALUE: &str = "STATISTIC_TO_VALUE";
 pub const OUTPOINT_TO_RUNE_BALANCES: &str = "OUTPOINT_TO_RUNE_BALANCES";
 pub const SPK_TO_OUTPOINTS: &str = "SPK_TO_OUTPOINTS";
 pub const RUNE_ID_TO_RUNE_ENTRY: &str = "RUNE_ID_TO_RUNE_ENTRY";
 pub const RUNE_TO_RUNE_ID: &str = "RUNE_TO_RUNE_ID";
-pub const TRANSACTION_ID_TO_RUNE: &str = "TRANSACTION_ID_TO_RUNE";
 
 pub const RUNE_ID_HEIGHT_TO_MINTS: &str = "RUNE_ID_HEIGHT_TO_MINTS";
 pub const RUNE_ID_HEIGHT_TO_BURNED: &str = "RUNE_ID_HEIGHT_TO_BURNED";
 
-pub const RUNE_ID_TO_NUMBER: &str = "RUNE_ID_TO_NUMBER";
 pub const RUNE_ID_TO_MINTS: &str = "RUNE_ID_TO_MINTS";
 pub const RUNE_ID_TO_BURNED: &str = "RUNE_ID_TO_BURNED";
 
-pub struct RunesDBOption {
-    read_only: bool,
-}
 
 impl RunesDB {
     pub fn new<P: AsRef<Path>>(path: P) -> Self {
-        Self::new_with_option(path, RunesDBOption { read_only: false })
-    }
-
-    pub fn new_read_only<P: AsRef<Path>>(path: P) -> Self {
-        Self::new_with_option(path, RunesDBOption { read_only: true })
-    }
-
-    pub fn new_with_option<P: AsRef<Path>>(path: P, option: RunesDBOption) -> Self {
         let mut db_opts = Options::default();
         db_opts.create_if_missing(true);
         db_opts.create_missing_column_families(true);
-        db_opts.set_max_open_files(100_000);
         db_opts.set_compaction_style(rocksdb::DBCompactionStyle::Level);
         db_opts.set_compression_type(rocksdb::DBCompressionType::Zstd);
-        db_opts.set_compaction_readahead_size(1 << 20);
-        db_opts.increase_parallelism(2);
 
         let cf_names = [
             HEIGHT_TO_BLOCK_HEADER,
             HEIGHT_TO_STATISTIC_COUNT,
+            STATISTIC_TO_VALUE,
             OUTPOINT_TO_RUNE_BALANCES,
             SPK_TO_OUTPOINTS,
             RUNE_ID_TO_RUNE_ENTRY,
             RUNE_TO_RUNE_ID,
-            TRANSACTION_ID_TO_RUNE,
             RUNE_ID_HEIGHT_TO_MINTS,
             RUNE_ID_HEIGHT_TO_BURNED,
-            RUNE_ID_TO_NUMBER,
             RUNE_ID_TO_MINTS,
             RUNE_ID_TO_BURNED,
         ];
@@ -71,14 +55,7 @@ impl RunesDB {
             .collect();
 
 
-        let db = match option.read_only {
-            true => {
-                DB::open_cf_descriptors_read_only(&db_opts, path, cf_descriptors, true).unwrap()
-            }
-            false => {
-                DB::open_cf_descriptors(&db_opts, path, cf_descriptors).unwrap()
-            }
-        };
+        let db = DB::open_cf_descriptors(&db_opts, path, cf_descriptors).unwrap();
 
         RunesDB { db }
     }
@@ -124,18 +101,18 @@ impl RunesDB {
 
     // specific methods
 
-    pub fn rune_id_to_number_put(&self, key: &RuneId, value: u32) {
-        self.put(RUNE_ID_TO_NUMBER, &key.store_bytes(), &value.to_be_bytes()).unwrap()
+    pub fn statistic_to_value_put(&self, statistic: &Statistic, value: u32) {
+        self.put(STATISTIC_TO_VALUE, &[statistic.key()], &value.to_be_bytes()).unwrap()
     }
 
-    pub fn rune_id_to_number_get(&self, key: &RuneId) -> Option<u32> {
-        self.get(RUNE_ID_TO_NUMBER, &key.store_bytes())
+    pub fn statistic_to_value_get(&self, statistic: &Statistic) -> Option<u32> {
+        self.get(STATISTIC_TO_VALUE, &[statistic.key()])
             .map(|opt| opt.map(|bytes| u32::from_be_bytes(bytes.try_into().unwrap()))).unwrap()
     }
 
-    pub fn rune_id_to_number_inc(&self, key: &RuneId) {
-        let current = self.rune_id_to_number_get(key).unwrap_or_default() + 1;
-        self.put(RUNE_ID_TO_NUMBER, &key.store_bytes(), &current.to_be_bytes()).unwrap()
+    pub fn statistic_to_value_inc(&self, statistic: &Statistic) {
+        let current = self.statistic_to_value_get(statistic).unwrap_or_default() + 1;
+        self.put(STATISTIC_TO_VALUE, &[statistic.key()], &current.to_be_bytes()).unwrap()
     }
 
     pub fn rune_id_to_mints_put(&self, key: &RuneId, value: u128) {
@@ -245,7 +222,7 @@ impl RunesDB {
             .map(|opt| opt.map(|bytes| RuneBalanceEntry::load_bytes(&bytes))).unwrap()
     }
 
-    pub fn spk_to_rune_entries(&self, key: &ScriptBuf) -> Vec<(OutPoint, RuneBalanceEntry)> {
+    pub fn spk_to_rune_balance_entries(&self, key: &ScriptBuf) -> Vec<(OutPoint, RuneBalanceEntry)> {
         let entries = self.spk_to_outpoints_get(key).unwrap_or_default();
         let mut list = vec![];
         for outpoint in entries {
@@ -269,6 +246,40 @@ impl RunesDB {
     }
     pub fn rune_id_to_rune_entry_del(&self, key: &RuneId) {
         self.del(RUNE_ID_TO_RUNE_ENTRY, &key.store_bytes()).unwrap()
+    }
+
+    pub fn rune_entry_paged(&self, cursor: usize, size: usize, keywords: Option<String>, sort: Option<String>) -> (bool, Vec<(RuneId, RuneEntry)>) {
+        let cf = self.get_cf(RUNE_ID_TO_RUNE_ENTRY);
+        let keywords = keywords.map(|x| x.to_uppercase());
+        let mode = match sort.as_deref() {
+            Some("asc") => IteratorMode::Start,
+            Some("desc") => IteratorMode::End,
+            _ => IteratorMode::Start,
+        };
+        let mut iter = self.db.iterator_cf(cf, mode);
+        let mut list = vec![];
+        for _ in 0..cursor {
+            if iter.next().is_none() {
+                return (false, list);
+            }
+        }
+        for _ in 0..size {
+            match iter.next() {
+                None => return (false, list),
+                Some(v) => {
+                    let (k, v) = v.unwrap();
+                    let key = RuneId::load_bytes(&k);
+                    let value = RuneEntry::load_bytes(&v);
+                    if let Some(keywords) = &keywords {
+                        if !value.spaced_rune.rune.to_string().contains(keywords) && !value.spaced_rune.to_string().contains(keywords) && !key.to_string().contains(keywords) {
+                            continue;
+                        }
+                    }
+                    list.push((key, value));
+                }
+            }
+        }
+        (iter.next().is_some(), list)
     }
 
     pub fn rune_to_rune_id_put(&self, key: &Rune, value: &RuneId) {
@@ -314,9 +325,7 @@ impl RunesDB {
         exist.retain(|x| {
             match self.outpoint_to_rune_balances_get(x) {
                 None => true,
-                Some(v) => {
-                    v.1 > 0 && height - v.1 > REORG_DEPTH
-                }
+                Some(v) => v.1 == 0 || height - v.1 < REORG_DEPTH
             }
         });
         if exist.is_empty() {
@@ -324,15 +333,6 @@ impl RunesDB {
         } else {
             self.spk_to_outpoints_put(key, &exist);
         }
-    }
-
-    pub fn transaction_id_to_rune_put(&self, key: &Txid, value: &Rune) {
-        self.put(TRANSACTION_ID_TO_RUNE, &key.store_bytes(), &value.store_bytes()).unwrap()
-    }
-
-    pub fn transaction_id_to_rune_get(&self, key: &Txid) -> Option<Rune> {
-        self.get(TRANSACTION_ID_TO_RUNE, &key.store_bytes())
-            .map(|opt| opt.map(|bytes| Rune::load_bytes(&bytes))).unwrap()
     }
 
     pub fn height_to_block_header_put(&self, key: u32, value: &Header) {
@@ -350,14 +350,18 @@ impl RunesDB {
         match iter.next() {
             None => None,
             Some(v) => {
-                let (k, _) = v.unwrap();
+                let k = v.unwrap().0;
                 let height = u32::from_be_bytes([k[0], k[1], k[2], k[3]]);
                 Some(height)
             }
         }
     }
 
-    pub fn height_to_statistic_count_put(&self, statistic: &Statistic, height: u32, value: u64) {
+    pub fn latest_height(&self) -> Option<u32> {
+        self.statistic_to_value_get(&Statistic::LatestHeight)
+    }
+
+    pub fn height_to_statistic_count_put(&self, statistic: &Statistic, height: u32, value: u32) {
         let mut combined_key: [u8; 5] = [0; 5];
         combined_key[0] = statistic.key();
         combined_key[1..].copy_from_slice(&height.to_be_bytes());
@@ -372,12 +376,12 @@ impl RunesDB {
         self.put(HEIGHT_TO_STATISTIC_COUNT, &combined_key, &current.to_be_bytes()).unwrap()
     }
 
-    pub fn height_to_statistic_count_get(&self, statistic: &Statistic, height: u32) -> Option<u64> {
+    pub fn height_to_statistic_count_get(&self, statistic: &Statistic, height: u32) -> Option<u32> {
         let mut combined_key: [u8; 5] = [0; 5];
         combined_key[0] = statistic.key();
         combined_key[1..].copy_from_slice(&height.to_be_bytes());
         self.get(HEIGHT_TO_STATISTIC_COUNT, &combined_key)
-            .map(|opt| opt.map(|bytes| u64::from_be_bytes(bytes.try_into().unwrap()))).unwrap()
+            .map(|opt| opt.map(|bytes| u32::from_be_bytes(bytes.try_into().unwrap()))).unwrap()
     }
 
     pub fn height_to_statistic_count_sum_to_height(&self, statistic: &Statistic, to_height: u32) -> u64 {
@@ -395,7 +399,6 @@ impl RunesDB {
         count
     }
 
-
     pub fn reorg_to_height(&self, height: u32) {
         // Delete all data after height
         let cf = self.get_cf(HEIGHT_TO_BLOCK_HEADER);
@@ -404,7 +407,7 @@ impl RunesDB {
         for v in iter {
             let (k, _) = v.unwrap();
             let h = u32::from_be_bytes([k[0], k[1], k[2], k[3]]);
-            if h > height {
+            if h >= height {
                 batch.delete_cf(cf, &k);
             }
         }
@@ -414,7 +417,7 @@ impl RunesDB {
         for v in iter {
             let (k, _) = v.unwrap();
             let h = u32::from_be_bytes([k[1], k[2], k[3], k[4]]);
-            if h > height {
+            if h >= height {
                 batch.delete_cf(cf, &k);
             }
         }
@@ -424,7 +427,7 @@ impl RunesDB {
         for v in iter {
             let (k, _) = v.unwrap();
             let h = u64::from_be_bytes(k[0..8].try_into().unwrap());
-            if h > height as _ {
+            if h >= height as _ {
                 batch.delete_cf(cf, &k);
             }
         }
@@ -434,7 +437,7 @@ impl RunesDB {
         for v in iter {
             let (k, _) = v.unwrap();
             let h = u64::from_be_bytes(k[0..8].try_into().unwrap());
-            if h > height as _ {
+            if h >= height as _ {
                 batch.delete_cf(cf, &k);
             }
         }
@@ -444,7 +447,7 @@ impl RunesDB {
         for v in iter {
             let (k, _) = v.unwrap();
             let h = u64::from_be_bytes(k[0..8].try_into().unwrap());
-            if h > height as _ {
+            if h >= height as _ {
                 {
                     let rune_id = RuneId::load_bytes(&k);
                     let entry = self.rune_id_to_rune_entry_get(&rune_id).unwrap();
@@ -460,12 +463,12 @@ impl RunesDB {
         for v in iter {
             let (k, v) = v.unwrap();
             let confirmed_height = u32::from_be_bytes(v[0..4].try_into().unwrap());
-            if confirmed_height > height {
+            if confirmed_height >= height {
                 batch.delete_cf(cf, &k);
                 continue;
             }
             let spent_height = u32::from_be_bytes(v[4..8].try_into().unwrap());
-            if spent_height > height {
+            if spent_height >= height {
                 let mut entry = RuneBalanceEntry::load_bytes(&v);
                 entry.1 = 0;
                 batch.put_cf(cf, &k, &entry.store_bytes());
@@ -478,8 +481,17 @@ impl RunesDB {
         // Update rune info
         let mut batch = WriteBatch::default();
 
+        let runes_count = self.height_to_statistic_count_sum_to_height(&Statistic::Runes, height - 1);
+        batch.put_cf(self.get_cf(STATISTIC_TO_VALUE), [Statistic::Runes.key()], runes_count.to_be_bytes());
+
+        let reserved_runes_count = self.height_to_statistic_count_sum_to_height(&Statistic::ReservedRunes, height - 1);
+        batch.put_cf(self.get_cf(STATISTIC_TO_VALUE), [Statistic::ReservedRunes.key()], reserved_runes_count.to_be_bytes());
+
+
         let cf = self.get_cf(RUNE_ID_TO_RUNE_ENTRY);
         let iter = self.db.iterator_cf(cf, IteratorMode::Start);
+
+        let mut runes_total = 0;
         for (number, v) in iter.enumerate() {
             let (k, v) = v.unwrap();
             let key = RuneId::load_bytes(&k);
@@ -490,12 +502,13 @@ impl RunesDB {
             let mints = self.rune_id_to_mints_sum_to_height(&key, height);
             batch.put_cf(self.get_cf(RUNE_ID_TO_MINTS), &k, mints.to_be_bytes());
             value.mints = mints;
-            let number: u64 = number as _;
-            batch.put_cf(self.get_cf(RUNE_ID_TO_NUMBER), &k, number.to_be_bytes());
-            value.number = number;
+            value.number = number as _;
             batch.put_cf(cf, &k, &value.store_bytes());
+            runes_total += 1;
         }
-
+        if runes_count != runes_total {
+            panic!("Runes count mismatch: {} != {}", runes_count, runes_total);
+        }
         self.db.write(batch).unwrap();
     }
 }

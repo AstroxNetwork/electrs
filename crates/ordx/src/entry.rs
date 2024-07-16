@@ -561,6 +561,7 @@ pub enum Statistic {
     IndexTransactions = 12,
     IndexSpentSats = 13,
     InitialSyncTime = 14,
+    LatestHeight = u8::MAX as _,
 }
 
 impl Statistic {

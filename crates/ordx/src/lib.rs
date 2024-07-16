@@ -7,3 +7,4 @@ pub mod into_usize;
 pub mod bincode;
 pub mod db;
 pub mod rpc;
+pub mod api;

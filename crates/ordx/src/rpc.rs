@@ -1,3 +1,4 @@
+use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::{bail, Context};
@@ -8,7 +9,7 @@ use tokio::time::sleep;
 use crate::chain::Chain;
 use crate::settings::Settings;
 
-pub fn create_bitcoincore_rpc_client(settings: &Settings) -> anyhow::Result<(Client, Chain)> {
+pub fn create_bitcoincore_rpc_client(settings: Arc<Settings>) -> anyhow::Result<(Client, Chain)> {
     let bitcoin_rpc_url = settings.bitcoin_rpc_url.as_ref().expect("BITCOIN_RPC_URL is required");
     let bitcoin_rpc_username = settings.bitcoin_rpc_username.as_ref().expect("BITCOIN_RPC_USERNAME is required");
     let bitcoin_rpc_password = settings.bitcoin_rpc_password.as_ref().expect("BITCOIN_RPC_PASSWORD is required");
@@ -25,15 +26,7 @@ pub fn create_bitcoincore_rpc_client(settings: &Settings) -> anyhow::Result<(Cli
 
     let binding = result.unwrap();
     let chain_str = binding.as_object().unwrap().get("chain").unwrap().as_str().unwrap();
-    let rpc_chain = match chain_str {
-        "main" | "mainnet" => Chain::Mainnet,
-        "test" | "testnet" => Chain::Testnet,
-        "test4" | "testnet4" => Chain::Testnet4,
-        "regtest" => Chain::Regtest,
-        "signet" => Chain::Signet,
-        other => bail!("Bitcoin RPC server on unknown chain: {other}"),
-    };
-
+    let rpc_chain = chain_str.parse::<Chain>().unwrap();
     let ord_chain = settings.network.as_ref().expect("network is required").parse::<Chain>().unwrap();
 
     if rpc_chain != ord_chain {

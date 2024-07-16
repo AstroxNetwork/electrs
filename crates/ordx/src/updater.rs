@@ -23,7 +23,7 @@ pub struct RuneUpdater<'a, 'client> {
     pub client: &'client Client,
     pub height: u32,
     pub minimum: Rune,
-    pub runes: u64,
+    pub runes: u32,
     pub runes_db: &'a RunesDB,
 }
 
@@ -235,7 +235,7 @@ impl<'a, 'client> RuneUpdater<'a, 'client> {
         Ok(())
     }
 
-    pub fn runes_num(&self) -> u64 {
+    pub fn runes_num(&self) -> u32 {
         self.runes
     }
 
@@ -247,10 +247,11 @@ impl<'a, 'client> RuneUpdater<'a, 'client> {
         rune: Rune,
     ) -> Result {
         self.runes_db.rune_to_rune_id_put(&rune, &id);
-        self.runes_db.transaction_id_to_rune_put(&txid, &rune);
 
-        let number = self.runes;
+        let number: u64 = self.runes as _;
         self.runes += 1;
+
+        self.runes_db.statistic_to_value_put(&Statistic::Runes, self.runes);
 
         let entry = match artifact {
             Artifact::Cenotaph(_) => RuneEntry {
@@ -299,7 +300,6 @@ impl<'a, 'client> RuneUpdater<'a, 'client> {
         };
 
         self.runes_db.rune_id_to_rune_entry_put(&id, &entry);
-        self.runes_db.rune_id_to_number_put(&id, self.runes as _);
         info!("New RUNE: {}({}, {})", entry.spaced_rune, id, number);
         Ok(())
     }
@@ -333,6 +333,7 @@ impl<'a, 'client> RuneUpdater<'a, 'client> {
         } else {
             self
                 .runes_db.height_to_statistic_count_inc(&Statistic::ReservedRunes, self.height);
+            self.runes_db.statistic_to_value_inc(&Statistic::ReservedRunes);
             Rune::reserved(self.height.into(), tx_index)
         };
 
