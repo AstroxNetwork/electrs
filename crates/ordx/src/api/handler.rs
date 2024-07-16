@@ -24,6 +24,7 @@ pub async fn block_height(Extension(db): Extension<Arc<RunesDB>>) -> impl IntoRe
     Json(R::with_data(json!({
         "indexed_height": indexed_height,
         "latest_height": latest_height,
+        "remaining_height": latest_height.unwrap_or_default() - indexed_height.unwrap_or_default(),
     })))
 }
 

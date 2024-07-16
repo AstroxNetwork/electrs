@@ -45,7 +45,7 @@ pub async fn create_server(settings: Arc<Settings>, runes_db: Arc<RunesDB>) -> a
                 .body(Body::from(body))
                 .unwrap()
         })
-        .route("/height", get(handler::block_height))
+        .route("/stats", get(handler::block_height))
         .route("/rune/:id", get(handler::get_rune_by_id))
         .route("/runes", get(handler::paged_runes))
         .route("/runes/utxo/:address", get(compat::address_runes))
@@ -53,7 +53,7 @@ pub async fn create_server(settings: Arc<Settings>, runes_db: Arc<RunesDB>) -> a
         .route("/runes/decode/tx", post(handler::runes_decode_tx))
         .route("/runes/outputs", post(handler::outputs_runes))
         .route("/runes/ids", post(handler::get_runes_by_rune_ids))
-        .route("/runes/address/:address", get(handler::address_runes))
+        .route("/runes/address/:address/utxo", get(handler::address_runes))
         .layer(GovernorLayer {
             config: governor_conf,
         })
