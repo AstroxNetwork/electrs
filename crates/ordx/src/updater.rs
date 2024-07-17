@@ -15,7 +15,7 @@ use crate::rpc::with_retry;
 
 pub type Result<T = (), E = anyhow::Error> = std::result::Result<T, E>;
 
-pub const REORG_DEPTH: u32 = 10;
+pub const REORG_DEPTH: u32 = 6;
 
 pub struct RuneUpdater<'a, 'client> {
     pub block_time: u32,

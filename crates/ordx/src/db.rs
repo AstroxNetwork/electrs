@@ -1,8 +1,9 @@
 use std::path::Path;
-
+use std::time::Instant;
 use bitcoin::{OutPoint, ScriptBuf};
 use bitcoin::block::Header;
 use itertools::Itertools;
+use log::info;
 use rocksdb::{ColumnFamily, ColumnFamilyDescriptor, DB, Error, IteratorMode, Options, WriteBatch};
 
 use ordinals::{Rune, RuneId};
@@ -321,6 +322,7 @@ impl RunesDB {
     }
 
     pub fn spk_to_outpoints_del_spent_height_gt_reorg_depth(&self, key: &ScriptBuf, height: u32) {
+        let start = Instant::now();
         let mut exist = self.spk_to_outpoints_get(key).unwrap_or_default();
         exist.retain(|x| {
             match self.outpoint_to_rune_balances_get(x) {
@@ -333,6 +335,7 @@ impl RunesDB {
         } else {
             self.spk_to_outpoints_put(key, &exist);
         }
+        info!("spk_to_outpoints_del_spent_height_gt_reorg_depth: {:?}", start.elapsed());
     }
 
     pub fn height_to_block_header_put(&self, key: u32, value: &Header) {
@@ -385,6 +388,7 @@ impl RunesDB {
     }
 
     pub fn height_to_statistic_count_sum_to_height(&self, statistic: &Statistic, to_height: u32) -> u64 {
+        let start = Instant::now();
         let cf = self.get_cf(HEIGHT_TO_STATISTIC_COUNT);
         let iter = self.db.prefix_iterator_cf(cf, [statistic.key()]);
         let mut count = 0;
@@ -396,6 +400,7 @@ impl RunesDB {
                 count += v;
             }
         }
+        info!("height_to_statistic_count_sum_to_height: {:?}", start.elapsed());
         count
     }
 
