@@ -1,9 +1,11 @@
 use std::collections::{HashMap, HashSet};
+use std::ops::DerefMut;
 use std::time::Duration;
 
 use bitcoin::{OutPoint, ScriptBuf, Transaction, Txid};
 use bitcoincore_rpc::{Client, RpcApi};
 use log::info;
+use rocksdb::WriteBatch;
 
 use ordinals::*;
 
@@ -17,27 +19,27 @@ pub type Result<T = (), E = anyhow::Error> = std::result::Result<T, E>;
 
 pub const REORG_DEPTH: u32 = 6;
 
-pub struct RuneUpdater<'a, 'client, > {
+pub struct RuneUpdater<'a, > {
     pub block_time: u32,
     pub burned: HashMap<RuneId, Lot>,
-    pub client: &'client Client,
+    pub client: &'a Client,
     pub height: u32,
     pub minimum: Rune,
     pub runes: u32,
     pub runes_db: &'a RunesDB,
+    pub block_spks: &'a mut HashSet<ScriptBuf>,
 }
 
-impl<'a, 'client> RuneUpdater<'a, 'client> {
+impl<'a> RuneUpdater<'a> {
     pub async fn index_runes(
         &mut self,
         tx_index: u32,
         tx: &Transaction,
-        block_spks: &mut HashSet<ScriptBuf>,
     ) -> Result<()> {
         let txid = tx.txid();
         let artifact = Runestone::decipher(tx);
 
-        let mut unallocated = self.unallocated(tx, block_spks)?;
+        let mut unallocated = self.unallocated(tx)?;
 
         let mut allocated: Vec<HashMap<RuneId, Lot>> = vec![HashMap::new(); tx.output.len()];
 
@@ -434,7 +436,7 @@ impl<'a, 'client> RuneUpdater<'a, 'client> {
         Ok(false)
     }
 
-    fn unallocated(&mut self, tx: &Transaction, block_spks: &mut HashSet<ScriptBuf>) -> Result<HashMap<RuneId, Lot>> {
+    fn unallocated(&mut self, tx: &Transaction) -> Result<HashMap<RuneId, Lot>> {
         // map of rune ID to un-allocated balance of that rune
         let mut unallocated: HashMap<RuneId, Lot> = HashMap::new();
 
@@ -453,7 +455,7 @@ impl<'a, 'client> RuneUpdater<'a, 'client> {
 
                 // delete spent outpoints with spent height greater than reorg depth
                 let spk = ScriptBuf::from_bytes(entry.3.to_vec());
-                block_spks.insert(spk);
+                self.block_spks.insert(spk);
 
 
                 entry.1 = self.height;

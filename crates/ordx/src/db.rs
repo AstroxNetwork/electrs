@@ -37,13 +37,8 @@ impl RunesDB {
         let mut db_opts = Options::default();
         db_opts.create_if_missing(true);
         db_opts.create_missing_column_families(true);
-
-        db_opts.set_max_open_files(100_000); // TODO: make sure to `ulimit -n` this process correctly
         db_opts.set_compaction_style(rocksdb::DBCompactionStyle::Level);
-        db_opts.set_compression_type(rocksdb::DBCompressionType::Snappy);
-        db_opts.set_target_file_size_base(1_073_741_824);
-        db_opts.set_write_buffer_size(256 << 20);
-        db_opts.set_disable_auto_compactions(true); // for initial bulk load
+        db_opts.set_compression_type(rocksdb::DBCompressionType::Zstd);
 
         // db_opts.set_advise_random_on_open(???);
         db_opts.set_compaction_readahead_size(1 << 20);
@@ -110,11 +105,18 @@ impl RunesDB {
             .collect()
     }
 
+    pub fn write_batch(&self, batch: WriteBatch) -> Result<(), Error> {
+        self.db.write(batch)
+    }
+
 
     // specific methods
-
     pub fn statistic_to_value_put(&self, statistic: &Statistic, value: u32) {
         self.put(STATISTIC_TO_VALUE, &[statistic.key()], &value.to_be_bytes()).unwrap()
+    }
+
+    pub fn statistic_to_value_put_with_batch(&self, wtx: &mut WriteBatch, statistic: &Statistic, value: u32) {
+        wtx.put_cf(self.get_cf(STATISTIC_TO_VALUE), [statistic.key()], value.to_be_bytes())
     }
 
     pub fn statistic_to_value_get(&self, statistic: &Statistic) -> Option<u32> {
@@ -200,6 +202,12 @@ impl RunesDB {
         let mut combined_key = rune_id.store_bytes();
         combined_key.extend_from_slice(&height.to_be_bytes());
         self.put(RUNE_ID_HEIGHT_TO_BURNED, &combined_key, &value.to_be_bytes()).unwrap()
+    }
+
+    pub fn rune_id_height_to_burned_put_with_batch(&self, wtx: &mut WriteBatch, rune_id: &RuneId, height: u32, value: u128) {
+        let mut combined_key = rune_id.store_bytes();
+        combined_key.extend_from_slice(&height.to_be_bytes());
+        wtx.put_cf(self.get_cf(RUNE_ID_HEIGHT_TO_BURNED), &combined_key, value.to_be_bytes())
     }
 
     pub fn rune_id_height_to_burned_get(&self, rune_id: &RuneId, height: u32) -> Option<u128> {
@@ -351,12 +359,10 @@ impl RunesDB {
         info!("spk_to_outpoints_del_spent_height_gt_reorg_depth: {:?}", start.elapsed());
     }
 
-    pub fn spk_to_outpoints_del_spent_height_gt_reorg_depth_batch(&self, keys: &HashSet<ScriptBuf>, height: u32) {
+    pub fn spk_to_outpoints_del_spent_height_gt_reorg_depth_batch(&self, wtx: &mut WriteBatch, keys: &HashSet<ScriptBuf>, height: u32) {
         if keys.is_empty() {
             return;
         }
-        let start = Instant::now();
-        let mut batch = WriteBatch::default();
         let cf = self.get_cf(SPK_TO_OUTPOINTS);
         for key in keys {
             if let Some(mut exist) = self.spk_to_outpoints_get(key) {
@@ -367,15 +373,13 @@ impl RunesDB {
                     }
                 });
                 if exist.is_empty() {
-                    batch.delete_cf(cf, key.as_bytes());
+                    wtx.delete_cf(cf, key.as_bytes());
                 } else {
                     let value = exist.iter().map(|x| x.store()).collect_vec().concat();
-                    batch.put_cf(cf, key.as_bytes(), &value);
+                    wtx.put_cf(cf, key.as_bytes(), &value);
                 }
             }
         }
-        self.db.write(batch).unwrap();
-        info!("spk_to_outpoints_del_spent_height_gt_reorg_depth_batch: {:?}", start.elapsed());
     }
 
 

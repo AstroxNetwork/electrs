@@ -11,7 +11,7 @@ ordinals = { path = "../ordinals" }
 rocksdb = "0.22.0"
 serde = "1.0.203"
 serde_derive = "1.0.203"
-bitcoin = { version = "0.31", features = ["serde","base64","rand"] }
+bitcoin = { version = "0.31", features = ["serde", "base64", "rand"] }
 itertools = "0.13.0"
 anyhow = "1.0.86"
 bitcoincore-rpc = "0.18"
@@ -31,6 +31,7 @@ forwarded-header-value = "0.1.1"
 http-body-util = "0.1.2"
 hex = "0.4.3"
 base64 = "0.22.1"
+ctrlc = { version = "3.4.4", features = ["termination"] }
 
 [build-dependencies]
 vergen = { version = "9", features = ["build", "cargo", "rustc"] }
