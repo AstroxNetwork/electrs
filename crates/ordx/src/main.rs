@@ -73,7 +73,7 @@ async fn main() -> anyhow::Result<()> {
     let first_rune_height = {
         if chain == Chain::Testnet {
             // testnet first rune height
-            2583205
+            2583205 // 2586162
         } else {
             Rune::first_rune_height(chain.network())
         }
