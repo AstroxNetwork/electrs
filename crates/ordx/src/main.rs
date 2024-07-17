@@ -1,13 +1,13 @@
 use std::cmp::max;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::thread;
 use std::time::{Duration, Instant};
 
+use bitcoin::{ScriptBuf, Txid};
 use bitcoin::constants::SUBSIDY_HALVING_INTERVAL;
 use bitcoin::hashes::Hash;
-use bitcoin::Txid;
 use bitcoincore_rpc::RpcApi;
 use log::{info, warn};
 
@@ -170,8 +170,9 @@ async fn main() -> anyhow::Result<()> {
                     runes: runes_num_before,
                     runes_db: &runes_db,
                 };
+                let mut spks: HashSet<ScriptBuf> = HashSet::new();
                 for (i, tx) in block.txdata.iter().enumerate() {
-                    rune_updater.index_runes(u32::try_from(i).unwrap(), tx).await.unwrap();
+                    rune_updater.index_runes(u32::try_from(i).unwrap(), tx, &mut spks).await.unwrap();
                 }
                 rune_updater.update().unwrap();
                 let runes_num_total = rune_updater.runes_num();
@@ -182,6 +183,9 @@ async fn main() -> anyhow::Result<()> {
                     runes_db.height_to_statistic_count_put(&Statistic::Runes, block_height, changed_count);
                 }
                 runes_db.height_to_block_header_put(block_height, &block.header);
+
+                // Delete spent outpoints
+                runes_db.spk_to_outpoints_del_spent_height_gt_reorg_depth_batch(&spks, block_height);
 
                 let remaining_height = latest_height - block_height;
                 if remaining_height <= 3 {

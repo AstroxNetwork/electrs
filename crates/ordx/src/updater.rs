@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::time::Duration;
 
 use bitcoin::{OutPoint, ScriptBuf, Transaction, Txid};
@@ -17,7 +17,7 @@ pub type Result<T = (), E = anyhow::Error> = std::result::Result<T, E>;
 
 pub const REORG_DEPTH: u32 = 6;
 
-pub struct RuneUpdater<'a, 'client> {
+pub struct RuneUpdater<'a, 'client, > {
     pub block_time: u32,
     pub burned: HashMap<RuneId, Lot>,
     pub client: &'client Client,
@@ -32,11 +32,12 @@ impl<'a, 'client> RuneUpdater<'a, 'client> {
         &mut self,
         tx_index: u32,
         tx: &Transaction,
+        block_spks: &mut HashSet<ScriptBuf>,
     ) -> Result<()> {
         let txid = tx.txid();
         let artifact = Runestone::decipher(tx);
 
-        let mut unallocated = self.unallocated(tx)?;
+        let mut unallocated = self.unallocated(tx, block_spks)?;
 
         let mut allocated: Vec<HashMap<RuneId, Lot>> = vec![HashMap::new(); tx.output.len()];
 
@@ -189,9 +190,6 @@ impl<'a, 'client> RuneUpdater<'a, 'client> {
                 continue;
             }
 
-            // delete spent outpoints with spent height greater than reorg depth
-            self.runes_db.spk_to_outpoints_del_spent_height_gt_reorg_depth(&tx.output[vout].script_pubkey, self.height);
-
             buffer.clear();
 
             let mut balances = balances.into_iter().collect::<Vec<(RuneId, Lot)>>();
@@ -227,9 +225,7 @@ impl<'a, 'client> RuneUpdater<'a, 'client> {
         for (rune_id, burned) in &self.burned {
             let mut entry = self.runes_db.rune_id_to_rune_entry_get(rune_id).unwrap();
             self.runes_db.rune_id_height_to_burned_put(rune_id, self.height, burned.n());
-            let burned = self.runes_db.rune_id_to_burned_sum_to_height(rune_id, self.height);
-            self.runes_db.rune_id_to_burned_put(rune_id, burned);
-            entry.burned = burned;
+            entry.burned = self.runes_db.rune_id_to_burned_inc(rune_id);
             self.runes_db.rune_id_to_rune_entry_put(rune_id, &entry);
         }
         Ok(())
@@ -359,9 +355,7 @@ impl<'a, 'client> RuneUpdater<'a, 'client> {
 
         self.runes_db.rune_id_height_to_mints_inc(&id, self.height);
 
-        let mints = self.runes_db.rune_id_to_mints_sum_to_height(&id, self.height);
-        self.runes_db.rune_id_to_mints_put(&id, mints);
-        rune_entry.mints = mints;
+        rune_entry.mints = self.runes_db.rune_id_to_mints_inc(&id);
 
         self.runes_db.rune_id_to_rune_entry_put(&id, &rune_entry);
 
@@ -440,7 +434,7 @@ impl<'a, 'client> RuneUpdater<'a, 'client> {
         Ok(false)
     }
 
-    fn unallocated(&mut self, tx: &Transaction) -> Result<HashMap<RuneId, Lot>> {
+    fn unallocated(&mut self, tx: &Transaction, block_spks: &mut HashSet<ScriptBuf>) -> Result<HashMap<RuneId, Lot>> {
         // map of rune ID to un-allocated balance of that rune
         let mut unallocated: HashMap<RuneId, Lot> = HashMap::new();
 
@@ -459,7 +453,7 @@ impl<'a, 'client> RuneUpdater<'a, 'client> {
 
                 // delete spent outpoints with spent height greater than reorg depth
                 let spk = ScriptBuf::from_bytes(entry.3.to_vec());
-                self.runes_db.spk_to_outpoints_del_spent_height_gt_reorg_depth(&spk, self.height);
+                block_spks.insert(spk);
 
 
                 entry.1 = self.height;

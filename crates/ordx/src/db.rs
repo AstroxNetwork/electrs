@@ -1,5 +1,7 @@
+use std::collections::HashSet;
 use std::path::Path;
 use std::time::Instant;
+
 use bitcoin::{OutPoint, ScriptBuf};
 use bitcoin::block::Header;
 use itertools::Itertools;
@@ -125,9 +127,10 @@ impl RunesDB {
             .map(|opt| opt.map(|bytes| u128::from_be_bytes(bytes.try_into().unwrap()))).unwrap()
     }
 
-    pub fn rune_id_to_mints_inc(&self, key: &RuneId) {
+    pub fn rune_id_to_mints_inc(&self, key: &RuneId) -> u128 {
         let current = self.rune_id_to_mints_get(key).unwrap_or_default() + 1;
-        self.put(RUNE_ID_TO_MINTS, &key.store_bytes(), &current.to_be_bytes()).unwrap()
+        self.put(RUNE_ID_TO_MINTS, &key.store_bytes(), &current.to_be_bytes()).unwrap();
+        current
     }
 
     pub fn rune_id_to_burned_put(&self, key: &RuneId, value: u128) {
@@ -139,9 +142,10 @@ impl RunesDB {
             .map(|opt| opt.map(|bytes| u128::from_be_bytes(bytes.try_into().unwrap()))).unwrap()
     }
 
-    pub fn rune_id_to_burned_inc(&self, key: &RuneId) {
+    pub fn rune_id_to_burned_inc(&self, key: &RuneId) -> u128 {
         let current = self.rune_id_to_burned_get(key).unwrap_or_default() + 1;
-        self.put(RUNE_ID_TO_BURNED, &key.store_bytes(), &current.to_be_bytes()).unwrap()
+        self.put(RUNE_ID_TO_BURNED, &key.store_bytes(), &current.to_be_bytes()).unwrap();
+        current
     }
 
 
@@ -338,6 +342,34 @@ impl RunesDB {
         info!("spk_to_outpoints_del_spent_height_gt_reorg_depth: {:?}", start.elapsed());
     }
 
+    pub fn spk_to_outpoints_del_spent_height_gt_reorg_depth_batch(&self, keys: &HashSet<ScriptBuf>, height: u32) {
+        if keys.is_empty() {
+            return;
+        }
+        let start = Instant::now();
+        let mut batch = WriteBatch::default();
+        let cf = self.get_cf(SPK_TO_OUTPOINTS);
+        for key in keys {
+            if let Some(mut exist) = self.spk_to_outpoints_get(key) {
+                exist.retain(|x| {
+                    match self.outpoint_to_rune_balances_get(x) {
+                        None => true,
+                        Some(v) => v.1 == 0 || height - v.1 < REORG_DEPTH
+                    }
+                });
+                if exist.is_empty() {
+                    batch.delete_cf(cf, key.as_bytes());
+                } else {
+                    let value = exist.iter().map(|x| x.store()).collect_vec().concat();
+                    batch.put_cf(cf, key.as_bytes(), &value);
+                }
+            }
+        }
+        self.db.write(batch).unwrap();
+        info!("spk_to_outpoints_del_spent_height_gt_reorg_depth_batch: {:?}", start.elapsed());
+    }
+
+
     pub fn height_to_block_header_put(&self, key: u32, value: &Header) {
         self.put(HEIGHT_TO_BLOCK_HEADER, &key.to_be_bytes(), &value.store_bytes()).unwrap()
     }
@@ -388,7 +420,6 @@ impl RunesDB {
     }
 
     pub fn height_to_statistic_count_sum_to_height(&self, statistic: &Statistic, to_height: u32) -> u64 {
-        let start = Instant::now();
         let cf = self.get_cf(HEIGHT_TO_STATISTIC_COUNT);
         let iter = self.db.prefix_iterator_cf(cf, [statistic.key()]);
         let mut count = 0;
@@ -400,7 +431,6 @@ impl RunesDB {
                 count += v;
             }
         }
-        info!("height_to_statistic_count_sum_to_height: {:?}", start.elapsed());
         count
     }
 
