@@ -1,11 +1,9 @@
 use std::collections::{HashMap, HashSet};
-use std::ops::DerefMut;
 use std::time::Duration;
 
 use bitcoin::{OutPoint, ScriptBuf, Transaction, Txid};
 use bitcoincore_rpc::{Client, RpcApi};
 use log::info;
-use rocksdb::WriteBatch;
 
 use ordinals::*;
 
@@ -212,7 +210,7 @@ impl<'a> RuneUpdater<'a> {
             let sat = tx.output[vout].value.to_sat();
             let balance: RuneBalanceEntry = (self.height, 0, sat, tx.output[vout].script_pubkey.to_bytes(), buffer.clone());
             self.runes_db.outpoint_to_rune_balances_put(&outpoint, balance);
-            self.runes_db.spk_to_outpoints_one_put(&tx.output[vout].script_pubkey, &outpoint);
+            self.runes_db.spk_outpoint_to_spent_height_put(&tx.output[vout].script_pubkey, &outpoint);
         }
 
         // increment entries with burned runes
@@ -453,13 +451,13 @@ impl<'a> RuneUpdater<'a> {
                     *unallocated.entry(id).or_default() += balance;
                 }
 
-                // delete spent outpoints with spent height greater than reorg depth
                 let spk = ScriptBuf::from_bytes(entry.3.to_vec());
-                self.block_spks.insert(spk);
-
+                self.runes_db.spk_outpoint_to_spent_height_spent(&spk, &input.previous_output, self.height);
 
                 entry.1 = self.height;
                 self.runes_db.outpoint_to_rune_balances_put(&input.previous_output, entry);
+
+                self.block_spks.insert(spk);
             }
         }
 

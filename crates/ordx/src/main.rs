@@ -10,7 +10,6 @@ use bitcoin::constants::SUBSIDY_HALVING_INTERVAL;
 use bitcoin::hashes::Hash;
 use bitcoincore_rpc::RpcApi;
 use log::{info, warn};
-use rocksdb::WriteBatch;
 
 use ordinals::{Height, Rune, RuneId, SpacedRune, Terms};
 use ordx::api::create_server;
@@ -38,7 +37,24 @@ async fn main() -> anyhow::Result<()> {
 
     let db_path = chain.join_with_data_dir(settings.data_dir.clone().unwrap_or("./index".to_string()).as_str());
     info!("Using rocksdb at {:?}", db_path);
+    let open_db = Instant::now();
     let runes_db = Arc::new(RunesDB::new(db_path));
+    info!("DB opened, {:?}", open_db.elapsed());
+
+    let first_rune_height = {
+        if chain == Chain::Testnet {
+            // testnet first rune height
+            2583205
+        } else {
+            Rune::first_rune_height(chain.network())
+        }
+    };
+
+    let started_height = runes_db.latest_indexed_height().unwrap_or(first_rune_height);
+
+    let reorg = Instant::now();
+    runes_db.reorg_to_height(started_height);
+    info!("Reorg done, {:?}", reorg.elapsed());
 
     let server_db = Arc::clone(&runes_db);
     let server_settings = Arc::clone(&settings);
@@ -78,15 +94,6 @@ async fn main() -> anyhow::Result<()> {
         }
     }
 
-    let first_rune_height = {
-        if chain == Chain::Testnet {
-            // testnet first rune height
-            2583205 // 2586162
-        } else {
-            Rune::first_rune_height(chain.network())
-        }
-    };
-    let started_height = runes_db.latest_indexed_height().unwrap_or(first_rune_height);
 
     let start_timestamp = Instant::now();
 
@@ -174,8 +181,6 @@ async fn main() -> anyhow::Result<()> {
                 let updater_timestamp = Instant::now();
                 let runes_num_before = runes_db.statistic_to_value_get(&Statistic::Runes).unwrap_or_default();
                 let mut spks: HashSet<ScriptBuf> = HashSet::new();
-                let mut wtx = WriteBatch::default();
-                
                 let mut rune_updater = RuneUpdater {
                     block_time: block.header.time,
                     burned: HashMap::new(),
@@ -203,9 +208,7 @@ async fn main() -> anyhow::Result<()> {
                 runes_db.height_to_block_header_put(block_height, &block.header);
 
                 // Delete spent outpoints
-                runes_db.spk_to_outpoints_del_spent_height_gt_reorg_depth_batch(&mut wtx, &spks, block_height);
-
-                runes_db.write_batch(wtx).unwrap();
+                runes_db.spk_outpoint_to_del_spent_height_gt_reorg_depth_batch(&spks, block_height);
 
                 let remaining_height = latest_height - block_height;
                 if remaining_height <= 3 {
