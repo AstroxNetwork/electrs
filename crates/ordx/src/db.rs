@@ -5,7 +5,7 @@ use bitcoin::block::Header;
 use bitcoin::OutPoint;
 use bitcoin::ScriptBuf;
 use log::{error, info};
-use rocksdb::{ColumnFamily, ColumnFamilyDescriptor, DB, Error, IteratorMode, Options, ReadOptions, WriteBatch};
+use rocksdb::{ColumnFamily, ColumnFamilyDescriptor, DB, Error, IteratorMode, Options, WriteBatch};
 
 use ordinals::{Rune, RuneId};
 
@@ -555,29 +555,34 @@ impl RunesDB {
                 batch.delete_cf(cf, &k);
             }
         }
-        info!("<= RUNE_ID_TO_RUNE_ENTRY {}", count);
+        info!("<= RUNE_ID_TO_RUNE_ENTRY/RUNE_TO_RUNE_ID {}", count);
 
 
         info!("<= OUTPOINT_TO_RUNE_BALANCES ...");
         let cf = self.get_cf(OUTPOINT_TO_RUNE_BALANCES);
         let iter = self.db.iterator_cf(cf, IteratorMode::End);
         let mut count = 0;
+        let mut deleted = 0;
+        let mut changed = 0;
         for v in iter {
             count += 1;
             let (k, v) = v.unwrap();
-            let confirmed_height = u32::from_be_bytes(v[0..4].try_into().unwrap());
+            let confirmed_height = u32::from_le_bytes(v[0..4].try_into().unwrap());
             if confirmed_height >= height {
                 batch.delete_cf(cf, &k);
+                deleted += 1;
                 continue;
             }
-            let spent_height = u32::from_be_bytes(v[4..8].try_into().unwrap());
+            let spent_height = u32::from_le_bytes(v[4..8].try_into().unwrap());
             if spent_height >= height {
                 let mut entry = RuneBalanceEntry::load_bytes(&v);
                 entry.1 = 0;
                 batch.put_cf(cf, &k, &entry.store_bytes());
+                changed += 1;
             }
         }
-        info!("<= OUTPOINT_TO_RUNE_BALANCES {}", count);
+
+        info!("<= OUTPOINT_TO_RUNE_BALANCES {}, deleted: {}, changed: {}", count, deleted, changed);
 
         self.db.write(batch).unwrap();
 

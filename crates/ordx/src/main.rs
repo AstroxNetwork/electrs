@@ -102,6 +102,7 @@ async fn main() -> anyhow::Result<()> {
     info!("Starting from height: {}", index_height.load(Ordering::Relaxed));
     loop {
         if shutdown.load(Ordering::Relaxed) {
+            runes_db.flush();
             warn!("Shutting down server...");
             server_handle.abort();
             let is_cancelled = server_handle.await.unwrap_err().is_cancelled();
