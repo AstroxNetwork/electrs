@@ -2114,7 +2114,7 @@ dependencies = [
 
 [[package]]
 name = "ordx"
-version = "0.1.2"
+version = "0.1.4"
 dependencies = [
  "anyhow",
  "axum",

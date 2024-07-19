@@ -1,12 +1,11 @@
 use std::collections::HashSet;
 use std::path::Path;
-use std::time::Instant;
 
-use bitcoin::{OutPoint, ScriptBuf};
 use bitcoin::block::Header;
-use itertools::Itertools;
-use log::{error, info, warn};
-use rocksdb::{ColumnFamily, ColumnFamilyDescriptor, DB, Error, IteratorMode, Options, WriteBatch};
+use bitcoin::OutPoint;
+use bitcoin::ScriptBuf;
+use log::{error, info};
+use rocksdb::{ColumnFamily, ColumnFamilyDescriptor, DB, Error, IteratorMode, Options, ReadOptions, WriteBatch};
 
 use ordinals::{Rune, RuneId};
 
@@ -39,10 +38,6 @@ impl RunesDB {
         db_opts.create_missing_column_families(true);
         db_opts.set_compaction_style(rocksdb::DBCompactionStyle::Level);
         db_opts.set_compression_type(rocksdb::DBCompressionType::Zstd);
-
-        // db_opts.set_advise_random_on_open(???);
-        db_opts.set_compaction_readahead_size(1 << 20);
-        db_opts.increase_parallelism(2);
 
         let cf_names = [
             HEIGHT_TO_BLOCK_HEADER,
@@ -182,10 +177,17 @@ impl RunesDB {
 
     pub fn rune_id_to_mints_sum_to_height(&self, rune_id: &RuneId, to_height: u32) -> u128 {
         let cf = self.get_cf(RUNE_ID_HEIGHT_TO_MINTS);
-        let iter = self.db.prefix_iterator_cf(cf, rune_id.store_bytes());
+        let prefix = rune_id.store_bytes();
+        let prefix_len = prefix.len();
+        let iter = self.db.prefix_iterator_cf(cf, &prefix);
         let mut count = 0;
         for x in iter {
             let (k, v) = x.unwrap();
+
+            if prefix != k[0..prefix_len] {
+                break;
+            }
+
             let height = u32::from_be_bytes([k[0], k[1], k[2], k[3]]);
             if height <= to_height {
                 let v = u128::from_be_bytes([
@@ -219,10 +221,17 @@ impl RunesDB {
 
     pub fn rune_id_height_to_burned_sum_to_height(&self, rune_id: &RuneId, to_height: u32) -> u128 {
         let cf = self.get_cf(RUNE_ID_HEIGHT_TO_BURNED);
-        let iter = self.db.prefix_iterator_cf(cf, rune_id.store_bytes());
+        let prefix = rune_id.store_bytes();
+        let prefix_len = prefix.len();
+        let iter = self.db.prefix_iterator_cf(cf, &prefix);
         let mut count = 0;
         for x in iter {
             let (k, v) = x.unwrap();
+
+            if prefix != k[0..prefix_len] {
+                break;
+            }
+
             let height = u32::from_be_bytes([k[0], k[1], k[2], k[3]]);
             if height <= to_height {
                 let v = u128::from_be_bytes([
@@ -242,32 +251,6 @@ impl RunesDB {
     pub fn outpoint_to_rune_balances_get(&self, key: &OutPoint) -> Option<RuneBalanceEntry> {
         self.get(OUTPOINT_TO_RUNE_BALANCES, &key.store())
             .map(|opt| opt.map(|bytes| RuneBalanceEntry::load_bytes(&bytes))).unwrap()
-    }
-
-    pub fn spk_to_rune_balance_entries(&self, key: &ScriptBuf) -> Vec<(OutPoint, RuneBalanceEntry)> {
-        let cf = self.get_cf(SPK_OUTPOINT_TO_SPENT_HEIGHT);
-        let mut list = vec![];
-        let iter = self.db.prefix_iterator_cf(cf, key.as_bytes());
-        for x in iter {
-            let (k, v) = x.unwrap();
-            if !v.is_empty() {
-                continue;
-            }
-            let x1 = &k[key.len()..];
-            if x1.len() != 36 {
-                error!("Invalid outpoint length: {}", x1.len());
-                continue;
-            }
-            let mut outpoint: OutPointValue = [0; 36];
-            outpoint.copy_from_slice(x1);
-            let outpoint = OutPoint::load(outpoint);
-            if let Some(v) = self.outpoint_to_rune_balances_get(&outpoint) {
-                if v.1 == 0 {
-                    list.push((outpoint, v));
-                }
-            }
-        }
-        list
     }
 
 
@@ -293,28 +276,41 @@ impl RunesDB {
         };
         let mut iter = self.db.iterator_cf(cf, mode);
         let mut list = vec![];
-        for _ in 0..cursor {
-            if iter.next().is_none() {
-                return (false, list);
-            }
-        }
-        for _ in 0..size {
-            match iter.next() {
-                None => return (false, list),
-                Some(v) => {
+        let mut cursor = cursor;
+        while cursor > 0 {
+            if let Some(keywords) = &keywords {
+                if let Some(v) = iter.next() {
                     let (k, v) = v.unwrap();
                     let key = RuneId::load_bytes(&k);
                     let value = RuneEntry::load_bytes(&v);
-                    if let Some(keywords) = &keywords {
-                        if !value.spaced_rune.rune.to_string().contains(keywords) && !value.spaced_rune.to_string().contains(keywords) && !key.to_string().contains(keywords) {
-                            continue;
-                        }
+                    if value.spaced_rune.rune.to_string().contains(keywords) || value.spaced_rune.to_string().contains(keywords) || key.to_string().contains(keywords) {
+                        cursor -= 1;
                     }
-                    list.push((key, value));
+                } else {
+                    return (false, list);
                 }
+            } else {
+                if iter.next().is_none() {
+                    return (false, list);
+                }
+                cursor -= 1;
             }
         }
-        (iter.next().is_some(), list)
+        while let Some(v) = iter.next() {
+            let (k, v) = v.unwrap();
+            let key = RuneId::load_bytes(&k);
+            let value = RuneEntry::load_bytes(&v);
+            if let Some(keywords) = &keywords {
+                if !value.spaced_rune.rune.to_string().contains(keywords) && !value.spaced_rune.to_string().contains(keywords) && !key.to_string().contains(keywords) {
+                    continue;
+                }
+            }
+            list.push((key, value));
+            if list.len() >= size {
+                return (iter.next().is_some(), list);
+            }
+        }
+        (false, list)
     }
 
     pub fn rune_to_rune_id_put(&self, key: &Rune, value: &RuneId) {
@@ -342,18 +338,6 @@ impl RunesDB {
         self.put(SPK_OUTPOINT_TO_SPENT_HEIGHT, &combined_key, &height.to_be_bytes()).unwrap()
     }
 
-    pub fn spk_outpoint_to_spent_height_get(&self, key: &ScriptBuf, value: &OutPoint) -> Option<u32> {
-        let mut combined_key = key.as_bytes().to_vec();
-        combined_key.extend_from_slice(&value.store());
-        self.get(SPK_OUTPOINT_TO_SPENT_HEIGHT, &combined_key)
-            .map(|opt| opt.map(|bytes| {
-                if bytes.is_empty() {
-                    return 0;
-                }
-                u32::from_be_bytes(bytes.try_into().unwrap())
-            })).unwrap()
-    }
-
     pub fn spk_outpoint_to_spent_height_del(&self, key: &ScriptBuf, value: &OutPoint) {
         let mut combined_key = key.as_bytes().to_vec();
         combined_key.extend_from_slice(&value.store());
@@ -367,9 +351,16 @@ impl RunesDB {
         let cf = self.get_cf(SPK_OUTPOINT_TO_SPENT_HEIGHT);
         let mut write_batch = WriteBatch::default();
         for key in keys {
-            let iter = self.db.prefix_iterator_cf(cf, key.as_bytes());
+            let prefix = key.as_bytes();
+            let prefix_len = prefix.len();
+            let iter = self.db.prefix_iterator_cf(cf, prefix);
             for x in iter {
                 let (k, v) = x.unwrap();
+
+                if prefix != &k[0..prefix_len] {
+                    break;
+                }
+
                 if v.is_empty() {
                     continue;
                 }
@@ -381,6 +372,39 @@ impl RunesDB {
             }
         }
         self.write_batch(write_batch).unwrap();
+    }
+
+    pub fn spk_to_rune_balance_entries(&self, key: &ScriptBuf) -> Vec<(OutPoint, RuneBalanceEntry)> {
+        let cf = self.get_cf(SPK_OUTPOINT_TO_SPENT_HEIGHT);
+        let mut list = vec![];
+        let prefix = key.as_bytes();
+        let prefix_len = prefix.len();
+        let iter = self.db.prefix_iterator_cf(cf, prefix);
+        for x in iter {
+            let (k, v) = x.unwrap();
+
+            if prefix != &k[0..prefix_len] {
+                break;
+            }
+
+            if !v.is_empty() {
+                continue;
+            }
+            let x1 = &k[prefix_len..];
+            if x1.len() != 36 {
+                error!("Invalid outpoint length: {}", x1.len());
+                continue;
+            }
+            let mut outpoint: OutPointValue = [0; 36];
+            outpoint.copy_from_slice(x1);
+            let outpoint = OutPoint::load(outpoint);
+            if let Some(v) = self.outpoint_to_rune_balances_get(&outpoint) {
+                if v.1 == 0 {
+                    list.push((outpoint, v));
+                }
+            }
+        }
+        list
     }
 
     pub fn height_to_block_header_put(&self, key: u32, value: &Header) {
@@ -434,10 +458,14 @@ impl RunesDB {
 
     pub fn height_to_statistic_count_sum_to_height(&self, statistic: &Statistic, to_height: u32) -> u32 {
         let cf = self.get_cf(HEIGHT_TO_STATISTIC_COUNT);
-        let iter = self.db.prefix_iterator_cf(cf, [statistic.key()]);
+        let prefix = statistic.key();
+        let iter = self.db.prefix_iterator_cf(cf, [prefix]);
         let mut count = 0;
         for x in iter {
             let (k, v) = x.unwrap();
+            if k[0] != prefix {
+                break;
+            }
             let height = u32::from_be_bytes([k[1], k[2], k[3], k[4]]);
             if height <= to_height {
                 let v = u32::from_be_bytes([v[0], v[1], v[2], v[3]]);
