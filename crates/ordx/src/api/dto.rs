@@ -54,6 +54,11 @@ impl From<bitcoin::psbt::PsbtParseError> for AppError {
         AppError(value.into())
     }
 }
+impl From<fs_extra::error::Error> for AppError {
+    fn from(value: fs_extra::error::Error) -> Self {
+        AppError(value.into())
+    }
+}
 
 pub fn serialize_as_string<S, T>(value: &T, serializer: S) -> Result<S::Ok, S::Error>
 where

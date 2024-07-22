@@ -5,11 +5,12 @@ use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::thread;
 use std::time::{Duration, Instant};
 
-use bitcoin::{ScriptBuf, Txid};
+use bitcoin::{OutPoint, ScriptBuf, Txid};
 use bitcoin::constants::SUBSIDY_HALVING_INTERVAL;
 use bitcoin::hashes::Hash;
 use bitcoincore_rpc::RpcApi;
 use log::{info, warn};
+use rocksdb::WriteBatch;
 
 use ordinals::{Height, Rune, RuneId, SpacedRune, Terms};
 use ordx::api::create_server;
@@ -52,9 +53,9 @@ async fn main() -> anyhow::Result<()> {
 
     let started_height = runes_db.latest_indexed_height().unwrap_or(first_rune_height);
 
-    let reorg = Instant::now();
-    runes_db.reorg_to_height(started_height);
-    info!("Reorg done, {:?}", reorg.elapsed());
+    // let reorg = Instant::now();
+    // runes_db.reorg_to_height(started_height);
+    // info!("Reorg done, {:?}", reorg.elapsed());
 
     let server_db = Arc::clone(&runes_db);
     let server_settings = Arc::clone(&settings);
@@ -182,6 +183,7 @@ async fn main() -> anyhow::Result<()> {
                 let updater_timestamp = Instant::now();
                 let runes_num_before = runes_db.statistic_to_value_get(&Statistic::Runes).unwrap_or_default();
                 let mut spks: HashSet<ScriptBuf> = HashSet::new();
+                let mut outpoints: HashSet<OutPoint> = HashSet::new();
                 let mut rune_updater = RuneUpdater {
                     block_time: block.header.time,
                     burned: HashMap::new(),
@@ -194,6 +196,7 @@ async fn main() -> anyhow::Result<()> {
                     runes: runes_num_before,
                     runes_db: &runes_db,
                     block_spks: &mut spks,
+                    block_outpoints: &mut outpoints,
                 };
                 for (i, tx) in block.txdata.iter().enumerate() {
                     rune_updater.index_runes(u32::try_from(i).unwrap(), tx).await.unwrap();
@@ -208,8 +211,15 @@ async fn main() -> anyhow::Result<()> {
                 }
                 runes_db.height_to_block_header_put(block_height, &block.header);
 
+                let mut write_batch = WriteBatch::default();
+
                 // Delete spent outpoints
-                runes_db.spk_outpoint_to_del_spent_height_gt_reorg_depth_batch(&spks, block_height);
+                runes_db.spk_outpoint_to_batch_del_spent_height_gt_reorg_depth(&mut write_batch, block_height, &spks);
+
+                // Delete spent outpoints
+                runes_db.height_outpoint_temp_batch_put_and_del(&mut write_batch, block_height, &outpoints);
+
+                runes_db.write_batch(write_batch).unwrap();
 
                 let remaining_height = latest_height - block_height;
                 if remaining_height <= 3 {

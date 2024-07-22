@@ -13,7 +13,7 @@ use crate::entry::{Entry, EntryBytes, OutPointValue, RuneBalanceEntry, RuneEntry
 use crate::updater::REORG_DEPTH;
 
 pub struct RunesDB {
-    db: DB,
+    pub db: DB,
 }
 
 pub const HEIGHT_TO_BLOCK_HEADER: &str = "HEIGHT_TO_BLOCK_HEADER";
@@ -23,6 +23,8 @@ pub const OUTPOINT_TO_RUNE_BALANCES: &str = "OUTPOINT_TO_RUNE_BALANCES";
 pub const SPK_OUTPOINT_TO_SPENT_HEIGHT: &str = "SPK_OUTPOINT_TO_SPENT_HEIGHT";
 pub const RUNE_ID_TO_RUNE_ENTRY: &str = "RUNE_ID_TO_RUNE_ENTRY";
 pub const RUNE_TO_RUNE_ID: &str = "RUNE_TO_RUNE_ID";
+
+pub const HEIGHT_OUTPOINT_TEMP: &str = "HEIGHT_OUTPOINT_TEMP";
 
 pub const RUNE_ID_HEIGHT_TO_MINTS: &str = "RUNE_ID_HEIGHT_TO_MINTS";
 pub const RUNE_ID_HEIGHT_TO_BURNED: &str = "RUNE_ID_HEIGHT_TO_BURNED";
@@ -51,6 +53,7 @@ impl RunesDB {
             RUNE_ID_HEIGHT_TO_BURNED,
             RUNE_ID_TO_MINTS,
             RUNE_ID_TO_BURNED,
+            HEIGHT_OUTPOINT_TEMP,
         ];
         let cf_descriptors: Vec<_> = cf_names.iter()
             .map(|name| ColumnFamilyDescriptor::new(*name, Options::default()))
@@ -58,7 +61,6 @@ impl RunesDB {
 
 
         let db = DB::open_cf_descriptors(&db_opts, path, cf_descriptors).unwrap();
-
         RunesDB { db }
     }
 
@@ -106,6 +108,34 @@ impl RunesDB {
 
 
     // specific methods
+
+    pub fn height_outpoint_temp_batch_put_and_del(&self, write_batch: &mut WriteBatch, height: u32, outpoints: &HashSet<OutPoint>) {
+        let cf = self.get_cf(HEIGHT_OUTPOINT_TEMP);
+        let iter = self.db.iterator_cf(cf, IteratorMode::Start);
+        let mut deleted = 0;
+        for x in iter {
+            let (k, _) = x.unwrap();
+            let h = u32::from_be_bytes([k[0], k[1], k[2], k[3]]) as i64;
+            if (height as i64) - h < (REORG_DEPTH as i64) {
+                break;
+            }
+            write_batch.delete_cf(cf, &k);
+            deleted += 1;
+        }
+        if outpoints.is_empty() {
+            if deleted > 0 {
+                info!("<= HEIGHT_OUTPOINT_TEMP, inserted: {}, deleted: {}", outpoints.len(), deleted);
+            }
+            return;
+        }
+        for outpoint in outpoints {
+            let mut key = height.to_be_bytes().to_vec();
+            key.extend_from_slice(&outpoint.store());
+            write_batch.put_cf(cf, &key, []);
+        }
+        info!("<= HEIGHT_OUTPOINT_TEMP, inserted: {}, deleted: {}", outpoints.len(), deleted);
+    }
+
     pub fn statistic_to_value_put(&self, statistic: &Statistic, value: u32) {
         self.put(STATISTIC_TO_VALUE, &[statistic.key()], &value.to_be_bytes()).unwrap()
     }
@@ -344,12 +374,12 @@ impl RunesDB {
         self.del(SPK_OUTPOINT_TO_SPENT_HEIGHT, &combined_key).unwrap()
     }
 
-    pub fn spk_outpoint_to_del_spent_height_gt_reorg_depth_batch(&self, keys: &HashSet<ScriptBuf>, height: u32) {
+    pub fn spk_outpoint_to_batch_del_spent_height_gt_reorg_depth(&self, write_batch: &mut WriteBatch, height: u32, keys: &HashSet<ScriptBuf>) {
         if keys.is_empty() {
             return;
         }
         let cf = self.get_cf(SPK_OUTPOINT_TO_SPENT_HEIGHT);
-        let mut write_batch = WriteBatch::default();
+        let mut deleted = 0;
         for key in keys {
             let prefix = key.as_bytes();
             let prefix_len = prefix.len();
@@ -364,14 +394,15 @@ impl RunesDB {
                 if v.is_empty() {
                     continue;
                 }
-                let spent_height = u32::from_be_bytes([v[0], v[1], v[2], v[3]]);
-                if spent_height == 0 || height - spent_height < REORG_DEPTH {
+                let spent_height = u32::from_be_bytes([v[0], v[1], v[2], v[3]]) as i64;
+                if spent_height == 0 || (height as i64) - spent_height < (REORG_DEPTH as i64) {
                     continue;
                 }
                 write_batch.delete_cf(cf, &k);
+                deleted += 1;
             }
         }
-        self.write_batch(write_batch).unwrap();
+        info!("<= SPK_OUTPOINT_TO_SPENT_HEIGHT, contained addresses: {}, deleted: {}", keys.len(), deleted);
     }
 
     pub fn spk_to_rune_balance_entries(&self, key: &ScriptBuf) -> Vec<(OutPoint, RuneBalanceEntry)> {
@@ -483,66 +514,73 @@ impl RunesDB {
         let cf = self.get_cf(HEIGHT_TO_BLOCK_HEADER);
         let iter = self.db.iterator_cf(cf, IteratorMode::End);
         let mut batch = WriteBatch::default();
-        let mut count = 0;
+        let mut deleted = 0;
         for v in iter {
-            count += 1;
             let (k, _) = v.unwrap();
             let h = u32::from_be_bytes([k[0], k[1], k[2], k[3]]);
             if h >= height {
                 batch.delete_cf(cf, &k);
+                deleted += 1;
+            } else {
+                break;
             }
         }
-        info!("<= HEIGHT_TO_BLOCK_HEADER {}", count);
+        info!("<= HEIGHT_TO_BLOCK_HEADER deleted: {}", deleted);
 
         info!("<= HEIGHT_TO_STATISTIC_COUNT ...");
         let cf = self.get_cf(HEIGHT_TO_STATISTIC_COUNT);
         let iter = self.db.iterator_cf(cf, IteratorMode::End);
-        let mut count = 0;
+        let mut deleted = 0;
         for v in iter {
-            count += 1;
             let (k, _) = v.unwrap();
             let h = u32::from_be_bytes([k[1], k[2], k[3], k[4]]);
             if h >= height {
                 batch.delete_cf(cf, &k);
+                deleted += 1;
+            } else {
+                break;
             }
         }
-        info!("<= HEIGHT_TO_STATISTIC_COUNT {}", count);
+        info!("<= HEIGHT_TO_STATISTIC_COUNT deleted: {}",  deleted);
 
         info!("<= RUNE_ID_HEIGHT_TO_MINTS ...");
         let cf = self.get_cf(RUNE_ID_HEIGHT_TO_MINTS);
         let iter = self.db.iterator_cf(cf, IteratorMode::End);
-        let mut count = 0;
+        let mut deleted = 0;
         for v in iter {
-            count += 1;
             let (k, _) = v.unwrap();
             let h = u64::from_be_bytes(k[0..8].try_into().unwrap());
             if h >= height as _ {
                 batch.delete_cf(cf, &k);
+                deleted += 1;
+            } else {
+                break;
             }
         }
-        info!("<= RUNE_ID_HEIGHT_TO_MINTS {}", count);
+        info!("<= RUNE_ID_HEIGHT_TO_MINTS deleted: {}", deleted);
 
         info!("<= RUNE_ID_HEIGHT_TO_BURNED ...");
         let cf = self.get_cf(RUNE_ID_HEIGHT_TO_BURNED);
         let iter = self.db.iterator_cf(cf, IteratorMode::End);
-        let mut count = 0;
+        let mut deleted = 0;
         for v in iter {
-            count += 1;
             let (k, _) = v.unwrap();
             let h = u64::from_be_bytes(k[0..8].try_into().unwrap());
             if h >= height as _ {
                 batch.delete_cf(cf, &k);
+                deleted += 1;
+            } else {
+                break;
             }
         }
-        info!("<= RUNE_ID_HEIGHT_TO_BURNED {}", count);
+        info!("<= RUNE_ID_HEIGHT_TO_BURNED deleted: {}",deleted);
 
 
         info!("<= RUNE_ID_TO_RUNE_ENTRY/RUNE_TO_RUNE_ID ...");
         let cf = self.get_cf(RUNE_ID_TO_RUNE_ENTRY);
         let iter = self.db.iterator_cf(cf, IteratorMode::End);
-        let mut count = 0;
+        let mut deleted = 0;
         for v in iter {
-            count += 1;
             let (k, _) = v.unwrap();
             let h = u64::from_be_bytes(k[0..8].try_into().unwrap());
             if h >= height as _ {
@@ -553,36 +591,45 @@ impl RunesDB {
                     batch.delete_cf(cf, &entry.spaced_rune.rune.store_bytes());
                 }
                 batch.delete_cf(cf, &k);
+                deleted += 1;
+            } else {
+                break;
             }
         }
-        info!("<= RUNE_ID_TO_RUNE_ENTRY/RUNE_TO_RUNE_ID {}", count);
+        info!("<= RUNE_ID_TO_RUNE_ENTRY deleted: {}", deleted);
 
 
         info!("<= OUTPOINT_TO_RUNE_BALANCES ...");
-        let cf = self.get_cf(OUTPOINT_TO_RUNE_BALANCES);
-        let iter = self.db.iterator_cf(cf, IteratorMode::End);
-        let mut count = 0;
+        let temp_cf = self.get_cf(HEIGHT_OUTPOINT_TEMP);
+        let otrb_cf = self.get_cf(OUTPOINT_TO_RUNE_BALANCES);
+        let iter = self.db.iterator_cf(temp_cf, IteratorMode::End);
         let mut deleted = 0;
         let mut changed = 0;
-        for v in iter {
-            count += 1;
-            let (k, v) = v.unwrap();
-            let confirmed_height = u32::from_le_bytes(v[0..4].try_into().unwrap());
-            if confirmed_height >= height {
-                batch.delete_cf(cf, &k);
-                deleted += 1;
-                continue;
-            }
-            let spent_height = u32::from_le_bytes(v[4..8].try_into().unwrap());
-            if spent_height >= height {
-                let mut entry = RuneBalanceEntry::load_bytes(&v);
-                entry.1 = 0;
-                batch.put_cf(cf, &k, &entry.store_bytes());
-                changed += 1;
+        for x in iter {
+            let (tk, _) = x.unwrap();
+            let h = u32::from_be_bytes([tk[0], tk[1], tk[2], tk[3]]);
+            if h >= height {
+                batch.delete_cf(temp_cf, &tk);
+                let k = &tk[4..];
+                let v = self.db.get_cf(otrb_cf, k).unwrap().unwrap();
+                let confirmed_height = u32::from_le_bytes(v[0..4].try_into().unwrap());
+                if confirmed_height >= height {
+                    batch.delete_cf(otrb_cf, k);
+                    deleted += 1;
+                    continue;
+                }
+                let spent_height = u32::from_le_bytes(v[4..8].try_into().unwrap());
+                if spent_height >= height {
+                    let mut entry = RuneBalanceEntry::load_bytes(&v);
+                    entry.1 = 0;
+                    batch.put_cf(otrb_cf, k, &entry.store_bytes());
+                    changed += 1;
+                }
+            } else {
+                break;
             }
         }
-
-        info!("<= OUTPOINT_TO_RUNE_BALANCES {}, deleted: {}, changed: {}", count, deleted, changed);
+        info!("<= OUTPOINT_TO_RUNE_BALANCES deleted: {}, changed: {}", deleted, changed);
 
         self.db.write(batch).unwrap();
 

@@ -15,7 +15,7 @@ use crate::rpc::with_retry;
 
 pub type Result<T = (), E = anyhow::Error> = std::result::Result<T, E>;
 
-pub const REORG_DEPTH: u32 = 6;
+pub const REORG_DEPTH: u32 = 10;
 
 pub struct RuneUpdater<'a, > {
     pub block_time: u32,
@@ -26,6 +26,7 @@ pub struct RuneUpdater<'a, > {
     pub runes: u32,
     pub runes_db: &'a RunesDB,
     pub block_spks: &'a mut HashSet<ScriptBuf>,
+    pub block_outpoints: &'a mut HashSet<OutPoint>,
 }
 
 impl<'a> RuneUpdater<'a> {
@@ -211,6 +212,8 @@ impl<'a> RuneUpdater<'a> {
             let balance: RuneBalanceEntry = (self.height, 0, sat, tx.output[vout].script_pubkey.to_bytes(), buffer.clone());
             self.runes_db.outpoint_to_rune_balances_put(&outpoint, balance);
             self.runes_db.spk_outpoint_to_spent_height_put(&tx.output[vout].script_pubkey, &outpoint);
+            
+            self.block_outpoints.insert(outpoint);
         }
 
         // increment entries with burned runes
@@ -458,6 +461,7 @@ impl<'a> RuneUpdater<'a> {
                 self.runes_db.outpoint_to_rune_balances_put(&input.previous_output, entry);
 
                 self.block_spks.insert(spk);
+                self.block_outpoints.insert(input.previous_output);
             }
         }
 

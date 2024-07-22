@@ -1,13 +1,9 @@
-use std::convert::Infallible;
 use std::net::SocketAddr;
-use std::panic::AssertUnwindSafe;
 use std::sync::Arc;
 
-use axum::{Extension, http, Json, Router};
+use axum::{Extension, http, Router};
 use axum::body::Body;
-use axum::http::{header, Request, Response, StatusCode};
-use axum::middleware::Next;
-use axum::response::IntoResponse;
+use axum::http::{header, Response, StatusCode};
 use axum::routing::{get, post};
 use log::info;
 use tower_governor::governor::GovernorConfigBuilder;

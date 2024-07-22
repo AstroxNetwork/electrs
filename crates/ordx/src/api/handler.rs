@@ -7,7 +7,7 @@ use axum::extract::{Path, Query};
 use axum::response::IntoResponse;
 use bitcoin::{Address, OutPoint, Transaction};
 use bitcoin::psbt::Psbt;
-use serde_json::json;
+use serde_json::{json, Value};
 
 use ordinals::{Artifact, Edict, Rune, RuneId, Runestone, SpacedRune};
 
@@ -18,14 +18,46 @@ use crate::into_usize::IntoUsize;
 use crate::lot::Lot;
 use crate::updater::RuneUpdater;
 
-pub async fn block_height(Extension(db): Extension<Arc<RunesDB>>) -> impl IntoResponse {
+fn format_size(bytes: u64) -> String {
+    let sizes = ["Bytes", "KB", "MB", "GB", "TB", "PB", "EB", "ZB", "YB"];
+    let factor = 1024.0;
+
+    if bytes < factor as u64 {
+        return format!("{} Bytes", bytes);
+    }
+
+    let mut size = bytes as f64;
+    let mut i = 0;
+    while size >= factor && i < sizes.len() - 1 {
+        size /= factor;
+        i += 1;
+    }
+
+    format!("{:.2} {}", size, sizes[i])
+}
+
+pub async fn block_height(
+    Extension(db): Extension<Arc<RunesDB>>,
+) -> anyhow::Result<Json<R<Value>>, AppError> {
     let indexed_height = db.latest_indexed_height();
     let latest_height = db.latest_height();
-    Json(R::with_data(json!({
-        "indexed_height": indexed_height,
-        "latest_height": latest_height,
-        "remaining_height": latest_height.unwrap_or_default() - indexed_height.unwrap_or_default(),
-    })))
+    let remaining_height = latest_height.unwrap_or_default() - indexed_height.unwrap_or_default();
+    let db_size = fs_extra::dir::get_size(db.db.path())?;
+    Ok(Json(R::with_data(json!({
+        "indexer": {
+            "indexed_height": indexed_height,
+            "latest_height": latest_height,
+            "remaining_height": remaining_height,
+            "remaining_percentage": format!("{:.5}%", remaining_height as f64 / latest_height.unwrap_or_default() as f64 * 100.0)
+        },
+        "binary": {
+            "version": env!("CARGO_PKG_VERSION"),
+            "timestamp": env!("VERGEN_BUILD_TIMESTAMP"),
+            "target": env!("VERGEN_CARGO_TARGET_TRIPLE"),
+            "rustc": env!("VERGEN_RUSTC_SEMVER"),
+        },
+        "db": format_size(db_size),
+    }))))
 }
 
 
