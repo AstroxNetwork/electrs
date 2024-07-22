@@ -92,7 +92,7 @@ impl RunesDB {
 
     pub fn list(&self, cf_name: &str) -> Vec<(Vec<u8>, Vec<u8>)> {
         let cf = self.get_cf(cf_name);
-        self.db.iterator_cf(cf, rocksdb::IteratorMode::Start)
+        self.db.iterator_cf(cf, IteratorMode::Start)
             .map(|r| {
                 let (k, v) = r.unwrap();
                 (k.to_vec(), v.to_vec())

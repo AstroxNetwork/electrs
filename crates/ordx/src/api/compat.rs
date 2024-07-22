@@ -5,19 +5,18 @@ use std::sync::Arc;
 
 use axum::{Extension, Json};
 use axum::extract::Path;
-use axum::response::IntoResponse;
 use bitcoin::{Address, Txid};
 use serde_derive::Serialize;
 
 use ordinals::{RuneId, SpacedRune};
 
-use crate::api::dto::serialize_as_string;
+use crate::api::dto::{AppError, serialize_as_string};
 use crate::db::RunesDB;
 use crate::entry::RuneEntry;
 use crate::updater::RuneUpdater;
 
 #[derive(Debug, Serialize)]
-struct R<T> {
+pub struct R<T> {
     pub status: bool,
     pub status_code: i64,
     pub message: String,
@@ -25,7 +24,7 @@ struct R<T> {
 }
 
 #[derive(Debug, Serialize)]
-struct RuneValue {
+pub struct RuneValue {
     pub address: String,
     #[serde(
         serialize_with = "serialize_as_string"
@@ -37,7 +36,7 @@ struct RuneValue {
 }
 
 #[derive(Debug, Serialize)]
-struct UTXO {
+pub struct UTXO {
     pub tx_hash: Txid,
     #[serde(
         serialize_with = "serialize_as_string"
@@ -50,7 +49,7 @@ struct UTXO {
 }
 
 #[derive(Debug, Serialize)]
-struct RuneItem {
+pub struct RuneItem {
     pub rune_id: RuneId,
     pub deploy_transaction: Txid,
     pub divisibility: u8,
@@ -67,8 +66,8 @@ struct RuneItem {
 pub async fn address_runes(
     Extension(db): Extension<Arc<RunesDB>>,
     Path(address_string): Path<String>,
-) -> impl IntoResponse {
-    let address = Address::from_str(&address_string).unwrap().assume_checked();
+) -> anyhow::Result<Json<R<RuneValue>>, AppError> {
+    let address = Address::from_str(&address_string)?.assume_checked();
     let spk = address.script_pubkey();
     let entries = db.spk_to_rune_balance_entries(&spk);
     let mut runes_map: HashMap<RuneId, RuneEntry> = HashMap::new();
@@ -77,7 +76,7 @@ pub async fn address_runes(
         let balances_buffer = entry.4;
         let mut i = 0;
         while i < balances_buffer.len() {
-            let ((id, balance), length) = RuneUpdater::decode_rune_balance(&balances_buffer[i..]).unwrap();
+            let ((id, balance), length) = RuneUpdater::decode_rune_balance(&balances_buffer[i..])?;
             i += length;
             let rune_entry: RuneEntry = {
                 if let Vacant(e) = runes_map.entry(id) {
@@ -109,10 +108,10 @@ pub async fn address_runes(
             });
         }
     }
-    Json(R {
+    Ok(Json(R {
         status: true,
         status_code: 200,
         message: "success".to_string(),
         data: items,
-    })
+    }))
 }

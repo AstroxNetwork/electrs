@@ -11,7 +11,7 @@ use serde_json::json;
 
 use ordinals::{Artifact, Edict, Rune, RuneId, Runestone, SpacedRune};
 
-use crate::api::dto::{AddressRuneUTXOsDTO, ExpandRuneEntry, OutputsDTO, Paged, R, RunesPageParams, RunesPSBTParams, RunesTxDTO, RunesTxParams, UTXOWithRuneValueDTO};
+use crate::api::dto::{AddressRuneUTXOsDTO, AppError, ExpandRuneEntry, OutputsDTO, Paged, R, RunesPageParams, RunesPSBTParams, RunesTxDTO, RunesTxParams, UTXOWithRuneValueDTO};
 use crate::api::util::hex_to_base64;
 use crate::db::RunesDB;
 use crate::into_usize::IntoUsize;
@@ -299,47 +299,44 @@ fn decode_runes_tx(db: &RunesDB, tx: Transaction) -> anyhow::Result<RunesTxDTO> 
 pub async fn runes_decode_psbt(
     Extension(db): Extension<Arc<RunesDB>>,
     Json(params): Json<RunesPSBTParams>,
-) -> impl IntoResponse {
-    let base64 = hex_to_base64(params.get_psbt_hex().expect("`psbtHex` is required.")).unwrap();
-    let psbt = Psbt::from_str(&base64).unwrap();
-    let x = decode_runes_tx(&db, psbt.unsigned_tx).unwrap();
-    Json(R::with_data(x))
+) -> anyhow::Result<Json<R<RunesTxDTO>>, AppError> {
+    let base64 = hex_to_base64(params.get_psbt_hex().expect("`psbtHex` is required."))?;
+    let psbt = Psbt::from_str(&base64)?;
+    let x = decode_runes_tx(&db, psbt.unsigned_tx)?;
+    Ok(Json(R::with_data(x)))
 }
 
 
 pub async fn runes_decode_tx(
     Extension(db): Extension<Arc<RunesDB>>,
     Json(params): Json<RunesTxParams>,
-) -> impl IntoResponse {
-    let bytes = hex::decode(params.get_raw_tx().expect("`rawTx` is required.")).unwrap();
-    let tx = bitcoin::consensus::deserialize(&bytes).unwrap();
-    let x = decode_runes_tx(&db, tx).unwrap();
-    Json(R::with_data(x))
+) -> anyhow::Result<Json<R<RunesTxDTO>>, AppError> {
+    let bytes = hex::decode(params.get_raw_tx().unwrap())?;
+    let tx = bitcoin::consensus::deserialize(&bytes)?;
+    let x = decode_runes_tx(&db, tx)?;
+    Ok(Json(R::with_data(x)))
 }
 
 pub async fn outputs_runes(
     Extension(db): Extension<Arc<RunesDB>>,
     Json(outpoints): Json<Vec<String>>,
-) -> impl IntoResponse {
+) -> anyhow::Result<Json<R<OutputsDTO>>, AppError> {
     if outpoints.is_empty() {
-        return Json(R::with_data(OutputsDTO::default()));
+        return Ok(Json(R::with_data(OutputsDTO::default())));
     }
     let mut runes_set = HashSet::new();
     let mut outputs = vec![];
     for outpoint in outpoints {
-        let outpoint = OutPoint::from_str(&outpoint).unwrap();
+        let outpoint = OutPoint::from_str(&outpoint)?;
         let mut balance_map = HashMap::new();
-        match db.outpoint_to_rune_balances_get(&outpoint) {
-            None => {}
-            Some(v) => {
-                let balances_buffer = v.4;
-                let mut i = 0;
-                while i < balances_buffer.len() {
-                    let ((id, balance), length) = RuneUpdater::decode_rune_balance(&balances_buffer[i..]).unwrap();
-                    i += length;
-                    balance_map.insert(id, balance);
-                    runes_set.insert(id);
-                }
+        if let Some(v) = db.outpoint_to_rune_balances_get(&outpoint) {
+            let balances_buffer = v.4;
+            let mut i = 0;
+            while i < balances_buffer.len() {
+                let ((id, balance), length) = RuneUpdater::decode_rune_balance(&balances_buffer[i..])?;
+                i += length;
+                balance_map.insert(id, balance);
+                runes_set.insert(id);
             }
         }
         outputs.push(balance_map);
@@ -350,17 +347,17 @@ pub async fn outputs_runes(
         let r = db.rune_id_to_rune_entry_get(&x).unwrap();
         runes.push(ExpandRuneEntry::load(x, r, latest_height));
     }
-    Json(R::with_data(OutputsDTO { runes, outputs }))
+    Ok(Json(R::with_data(OutputsDTO { runes, outputs })))
 }
 
 pub async fn get_runes_by_rune_ids(
     Extension(db): Extension<Arc<RunesDB>>,
     Json(rune_ids): Json<Vec<String>>,
-) -> impl IntoResponse {
-    if rune_ids.is_empty() {
-        return Json(R::with_data(vec![]));
-    }
+) -> anyhow::Result<Json<R<Vec<Option<ExpandRuneEntry>>>>, AppError> {
     let mut runes = vec![];
+    if rune_ids.is_empty() {
+        return Ok(Json(R::with_data(runes)));
+    }
     let latest_height = db.latest_height().unwrap_or_default();
     for x in rune_ids {
         match RuneId::from_str(&x) {
@@ -373,14 +370,14 @@ pub async fn get_runes_by_rune_ids(
             Err(_) => runes.push(None),
         }
     }
-    Json(R::with_data(runes))
+    Ok(Json(R::with_data(runes)))
 }
 
 pub async fn address_runes(
     Extension(db): Extension<Arc<RunesDB>>,
     Path(address): Path<String>,
-) -> impl IntoResponse {
-    let address = Address::from_str(&address).unwrap().assume_checked();
+) -> anyhow::Result<Json<R<AddressRuneUTXOsDTO>>, AppError> {
+    let address = Address::from_str(&address)?.assume_checked();
     let spk = address.script_pubkey();
     let entries = db.spk_to_rune_balance_entries(&spk);
     let mut runes_set = HashSet::new();
@@ -390,7 +387,7 @@ pub async fn address_runes(
         let mut i = 0;
         let mut balance_map = HashMap::new();
         while i < balances_buffer.len() {
-            let ((id, balance), length) = RuneUpdater::decode_rune_balance(&balances_buffer[i..]).unwrap();
+            let ((id, balance), length) = RuneUpdater::decode_rune_balance(&balances_buffer[i..])?;
             i += length;
             balance_map.insert(id, balance);
             runes_set.insert(id);
@@ -408,5 +405,5 @@ pub async fn address_runes(
         let r = db.rune_id_to_rune_entry_get(&x).unwrap();
         runes.push(ExpandRuneEntry::load(x, r, latest_height));
     }
-    Json(R::with_data(AddressRuneUTXOsDTO { utxos, runes }))
+    Ok(Json(R::with_data(AddressRuneUTXOsDTO { utxos, runes })))
 }

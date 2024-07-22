@@ -1,5 +1,8 @@
 use std::collections::HashMap;
 
+use axum::body::Body;
+use axum::http::StatusCode;
+use axum::response::{IntoResponse, Response};
 use bitcoin::{OutPoint, Txid};
 use serde::{Deserialize, Serialize, Serializer};
 use serde::ser::{SerializeMap, SerializeSeq};
@@ -8,6 +11,49 @@ use ordinals::{RuneId, SpacedRune};
 
 use crate::entry::RuneEntry;
 use crate::lot::Lot;
+
+pub struct AppError(anyhow::Error);
+
+impl IntoResponse for AppError {
+    fn into_response(self) -> Response {
+        let value: R<()> = R::error(-1, self.0.to_string());
+        Response::builder()
+            .status(StatusCode::INTERNAL_SERVER_ERROR)
+            .body(Body::from(serde_json::to_string(&value).unwrap()))
+            .unwrap()
+    }
+}
+
+impl From<anyhow::Error> for AppError {
+    fn from(err: anyhow::Error) -> Self {
+        AppError(err)
+    }
+}
+impl From<bitcoin::address::ParseError> for AppError {
+    fn from(err: bitcoin::address::ParseError) -> Self {
+        AppError(err.into())
+    }
+}
+impl From<bitcoin::transaction::ParseOutPointError> for AppError {
+    fn from(err: bitcoin::transaction::ParseOutPointError) -> Self {
+        AppError(err.into())
+    }
+}
+impl From<hex::FromHexError> for AppError {
+    fn from(err: hex::FromHexError) -> Self {
+        AppError(err.into())
+    }
+}
+impl From<bitcoin::consensus::encode::Error> for AppError {
+    fn from(value: bitcoin::consensus::encode::Error) -> Self {
+        AppError(value.into())
+    }
+}
+impl From<bitcoin::psbt::PsbtParseError> for AppError {
+    fn from(value: bitcoin::psbt::PsbtParseError) -> Self {
+        AppError(value.into())
+    }
+}
 
 pub fn serialize_as_string<S, T>(value: &T, serializer: S) -> Result<S::Ok, S::Error>
 where
