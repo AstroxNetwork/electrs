@@ -9,11 +9,13 @@ use bitcoin::{OutPoint, ScriptBuf, Txid};
 use bitcoin::constants::SUBSIDY_HALVING_INTERVAL;
 use bitcoin::hashes::Hash;
 use bitcoincore_rpc::RpcApi;
+use itertools::Itertools;
 use log::{info, warn};
 use rocksdb::WriteBatch;
 
 use ordinals::{Height, Rune, RuneId, SpacedRune, Terms};
 use ordx::api::create_server;
+use ordx::cache::create_cache;
 use ordx::chain::Chain;
 use ordx::db::RunesDB;
 use ordx::entry::{RuneEntry, Statistic};
@@ -36,11 +38,12 @@ async fn main() -> anyhow::Result<()> {
     info!("{}", &settings);
     let (rpc_client, chain) = create_bitcoincore_rpc_client(settings.clone()).unwrap();
 
-    let db_path = chain.join_with_data_dir(settings.data_dir.clone().unwrap_or("./index".to_string()).as_str());
-    info!("Using rocksdb at {:?}", db_path);
+    let rocksdb_path = chain.join_with_data_dir(settings.data_dir.clone().unwrap_or("./index".to_string()).as_str()).as_path().join("rocksdb");
+    info!("Using rocksdb at {:?}", rocksdb_path);
     let open_db = Instant::now();
-    let runes_db = Arc::new(RunesDB::new(db_path));
+    let runes_db = Arc::new(RunesDB::new(rocksdb_path));
     info!("DB opened, {:?}", open_db.elapsed());
+    let cache = Arc::new(create_cache());
 
     let first_rune_height = {
         if chain == Chain::Testnet {
@@ -59,8 +62,9 @@ async fn main() -> anyhow::Result<()> {
 
     let server_db = Arc::clone(&runes_db);
     let server_settings = Arc::clone(&settings);
+    let server_cache = Arc::clone(&cache);
     let server_handle = Box::new(tokio::spawn(async move {
-        create_server(server_settings, server_db).await.unwrap();
+        create_server(server_settings, server_db, server_cache).await.unwrap();
     }));
     // Create the first rune if it doesn't exist
     if chain == Chain::Mainnet {
@@ -220,6 +224,9 @@ async fn main() -> anyhow::Result<()> {
                 runes_db.height_outpoint_temp_batch_put_and_del(&mut write_batch, block_height, &outpoints);
 
                 runes_db.write_batch(write_batch).unwrap();
+                
+                // Clear cache
+                cache.invalidate_all();
 
                 let remaining_height = latest_height - block_height;
                 if remaining_height <= 3 {

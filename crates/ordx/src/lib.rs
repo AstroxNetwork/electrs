@@ -8,3 +8,4 @@ pub mod bincode;
 pub mod db;
 pub mod rpc;
 pub mod api;
+pub mod cache;

@@ -5,7 +5,7 @@ use bitcoin::{consensus, OutPoint, Txid};
 use bitcoin::block::Header;
 use bitcoin::consensus::{Decodable, Encodable};
 use bitcoin::hashes::Hash;
-use serde_derive::{Deserialize, Serialize};
+use serde::{Deserialize, Serialize};
 
 use ordinals::*;
 

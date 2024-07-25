@@ -13,7 +13,7 @@ use crate::entry::{Entry, EntryBytes, OutPointValue, RuneBalanceEntry, RuneEntry
 use crate::updater::REORG_DEPTH;
 
 pub struct RunesDB {
-    pub db: DB,
+    pub rocksdb: DB,
 }
 
 pub const HEIGHT_TO_BLOCK_HEADER: &str = "HEIGHT_TO_BLOCK_HEADER";
@@ -61,17 +61,17 @@ impl RunesDB {
 
 
         let db = DB::open_cf_descriptors(&db_opts, path, cf_descriptors).unwrap();
-        RunesDB { db }
+        RunesDB { rocksdb: db }
     }
 
     #[inline]
     pub fn get_cf(&self, cf_name: &str) -> &ColumnFamily {
-        self.db.cf_handle(cf_name).unwrap_or_else(|| panic!("Column family {} not found", cf_name))
+        self.rocksdb.cf_handle(cf_name).unwrap_or_else(|| panic!("Column family {} not found", cf_name))
     }
 
     pub fn put(&self, cf_name: &str, key: &[u8], value: &[u8]) -> Result<(), Error> {
         let cf = self.get_cf(cf_name);
-        self.db.put_cf(cf, key, value)
+        self.rocksdb.put_cf(cf, key, value)
     }
 
     pub fn insert(&self, cf_name: &str, key: &[u8], value: &[u8]) -> Result<(), Error> {
@@ -80,12 +80,12 @@ impl RunesDB {
 
     pub fn get(&self, cf_name: &str, key: &[u8]) -> Result<Option<Vec<u8>>, Error> {
         let cf = self.get_cf(cf_name);
-        self.db.get_cf(cf, key)
+        self.rocksdb.get_cf(cf, key)
     }
 
     pub fn del(&self, cf_name: &str, key: &[u8]) -> Result<(), Error> {
         let cf = self.get_cf(cf_name);
-        self.db.delete_cf(cf, key)
+        self.rocksdb.delete_cf(cf, key)
     }
 
     pub fn remove(&self, cf_name: &str, key: &[u8]) -> Result<(), Error> {
@@ -94,7 +94,7 @@ impl RunesDB {
 
     pub fn list(&self, cf_name: &str) -> Vec<(Vec<u8>, Vec<u8>)> {
         let cf = self.get_cf(cf_name);
-        self.db.iterator_cf(cf, IteratorMode::Start)
+        self.rocksdb.iterator_cf(cf, IteratorMode::Start)
             .map(|r| {
                 let (k, v) = r.unwrap();
                 (k.to_vec(), v.to_vec())
@@ -103,7 +103,7 @@ impl RunesDB {
     }
 
     pub fn write_batch(&self, batch: WriteBatch) -> Result<(), Error> {
-        self.db.write(batch)
+        self.rocksdb.write(batch)
     }
 
 
@@ -111,7 +111,7 @@ impl RunesDB {
 
     pub fn height_outpoint_temp_batch_put_and_del(&self, write_batch: &mut WriteBatch, height: u32, outpoints: &HashSet<OutPoint>) {
         let cf = self.get_cf(HEIGHT_OUTPOINT_TEMP);
-        let iter = self.db.iterator_cf(cf, IteratorMode::Start);
+        let iter = self.rocksdb.iterator_cf(cf, IteratorMode::Start);
         let mut deleted = 0;
         for x in iter {
             let (k, _) = x.unwrap();
@@ -209,7 +209,7 @@ impl RunesDB {
         let cf = self.get_cf(RUNE_ID_HEIGHT_TO_MINTS);
         let prefix = rune_id.store_bytes();
         let prefix_len = prefix.len();
-        let iter = self.db.prefix_iterator_cf(cf, &prefix);
+        let iter = self.rocksdb.prefix_iterator_cf(cf, &prefix);
         let mut count = 0;
         for x in iter {
             let (k, v) = x.unwrap();
@@ -253,7 +253,7 @@ impl RunesDB {
         let cf = self.get_cf(RUNE_ID_HEIGHT_TO_BURNED);
         let prefix = rune_id.store_bytes();
         let prefix_len = prefix.len();
-        let iter = self.db.prefix_iterator_cf(cf, &prefix);
+        let iter = self.rocksdb.prefix_iterator_cf(cf, &prefix);
         let mut count = 0;
         for x in iter {
             let (k, v) = x.unwrap();
@@ -304,7 +304,7 @@ impl RunesDB {
             Some("desc") => IteratorMode::End,
             _ => IteratorMode::Start,
         };
-        let mut iter = self.db.iterator_cf(cf, mode);
+        let mut iter = self.rocksdb.iterator_cf(cf, mode);
         let mut list = vec![];
         let mut cursor = cursor;
         while cursor > 0 {
@@ -383,7 +383,7 @@ impl RunesDB {
         for key in keys {
             let prefix = key.as_bytes();
             let prefix_len = prefix.len();
-            let iter = self.db.prefix_iterator_cf(cf, prefix);
+            let iter = self.rocksdb.prefix_iterator_cf(cf, prefix);
             for x in iter {
                 let (k, v) = x.unwrap();
 
@@ -410,7 +410,7 @@ impl RunesDB {
         let mut list = vec![];
         let prefix = key.as_bytes();
         let prefix_len = prefix.len();
-        let iter = self.db.prefix_iterator_cf(cf, prefix);
+        let iter = self.rocksdb.prefix_iterator_cf(cf, prefix);
         for x in iter {
             let (k, v) = x.unwrap();
 
@@ -449,7 +449,7 @@ impl RunesDB {
 
     pub fn latest_indexed_height(&self) -> Option<u32> {
         let cf = self.get_cf(HEIGHT_TO_BLOCK_HEADER);
-        let mut iter = self.db.iterator_cf(cf, IteratorMode::End);
+        let mut iter = self.rocksdb.iterator_cf(cf, IteratorMode::End);
         match iter.next() {
             None => None,
             Some(v) => {
@@ -490,7 +490,7 @@ impl RunesDB {
     pub fn height_to_statistic_count_sum_to_height(&self, statistic: &Statistic, to_height: u32) -> u32 {
         let cf = self.get_cf(HEIGHT_TO_STATISTIC_COUNT);
         let prefix = statistic.key();
-        let iter = self.db.prefix_iterator_cf(cf, [prefix]);
+        let iter = self.rocksdb.prefix_iterator_cf(cf, [prefix]);
         let mut count = 0;
         for x in iter {
             let (k, v) = x.unwrap();
@@ -512,7 +512,7 @@ impl RunesDB {
         // Delete all data after height
         info!("<= HEIGHT_TO_BLOCK_HEADER ...");
         let cf = self.get_cf(HEIGHT_TO_BLOCK_HEADER);
-        let iter = self.db.iterator_cf(cf, IteratorMode::End);
+        let iter = self.rocksdb.iterator_cf(cf, IteratorMode::End);
         let mut batch = WriteBatch::default();
         let mut deleted = 0;
         for v in iter {
@@ -529,7 +529,7 @@ impl RunesDB {
 
         info!("<= HEIGHT_TO_STATISTIC_COUNT ...");
         let cf = self.get_cf(HEIGHT_TO_STATISTIC_COUNT);
-        let iter = self.db.iterator_cf(cf, IteratorMode::End);
+        let iter = self.rocksdb.iterator_cf(cf, IteratorMode::End);
         let mut deleted = 0;
         for v in iter {
             let (k, _) = v.unwrap();
@@ -545,7 +545,7 @@ impl RunesDB {
 
         info!("<= RUNE_ID_HEIGHT_TO_MINTS ...");
         let cf = self.get_cf(RUNE_ID_HEIGHT_TO_MINTS);
-        let iter = self.db.iterator_cf(cf, IteratorMode::End);
+        let iter = self.rocksdb.iterator_cf(cf, IteratorMode::End);
         let mut deleted = 0;
         for v in iter {
             let (k, _) = v.unwrap();
@@ -561,7 +561,7 @@ impl RunesDB {
 
         info!("<= RUNE_ID_HEIGHT_TO_BURNED ...");
         let cf = self.get_cf(RUNE_ID_HEIGHT_TO_BURNED);
-        let iter = self.db.iterator_cf(cf, IteratorMode::End);
+        let iter = self.rocksdb.iterator_cf(cf, IteratorMode::End);
         let mut deleted = 0;
         for v in iter {
             let (k, _) = v.unwrap();
@@ -578,7 +578,7 @@ impl RunesDB {
 
         info!("<= RUNE_ID_TO_RUNE_ENTRY/RUNE_TO_RUNE_ID ...");
         let cf = self.get_cf(RUNE_ID_TO_RUNE_ENTRY);
-        let iter = self.db.iterator_cf(cf, IteratorMode::End);
+        let iter = self.rocksdb.iterator_cf(cf, IteratorMode::End);
         let mut deleted = 0;
         for v in iter {
             let (k, _) = v.unwrap();
@@ -602,7 +602,7 @@ impl RunesDB {
         info!("<= OUTPOINT_TO_RUNE_BALANCES ...");
         let temp_cf = self.get_cf(HEIGHT_OUTPOINT_TEMP);
         let otrb_cf = self.get_cf(OUTPOINT_TO_RUNE_BALANCES);
-        let iter = self.db.iterator_cf(temp_cf, IteratorMode::End);
+        let iter = self.rocksdb.iterator_cf(temp_cf, IteratorMode::End);
         let mut deleted = 0;
         let mut changed = 0;
         for x in iter {
@@ -611,7 +611,7 @@ impl RunesDB {
             if h >= height {
                 batch.delete_cf(temp_cf, &tk);
                 let k = &tk[4..];
-                let v = self.db.get_cf(otrb_cf, k).unwrap().unwrap();
+                let v = self.rocksdb.get_cf(otrb_cf, k).unwrap().unwrap();
                 let confirmed_height = u32::from_le_bytes(v[0..4].try_into().unwrap());
                 if confirmed_height >= height {
                     batch.delete_cf(otrb_cf, k);
@@ -631,7 +631,7 @@ impl RunesDB {
         }
         info!("<= OUTPOINT_TO_RUNE_BALANCES deleted: {}, changed: {}", deleted, changed);
 
-        self.db.write(batch).unwrap();
+        self.rocksdb.write(batch).unwrap();
 
         info!("Write stage 1 done.");
 
@@ -652,7 +652,7 @@ impl RunesDB {
 
         info!("<= RUNE_ID_TO_RUNE_ENTRY ...");
         let cf = self.get_cf(RUNE_ID_TO_RUNE_ENTRY);
-        let iter = self.db.iterator_cf(cf, IteratorMode::Start);
+        let iter = self.rocksdb.iterator_cf(cf, IteratorMode::Start);
 
         let mut runes_total = 0;
         for (number, v) in iter.enumerate() {
@@ -673,12 +673,12 @@ impl RunesDB {
         if runes_count != runes_total {
             panic!("Runes count mismatch: {} != {}", runes_count, runes_total);
         }
-        self.db.write(batch).unwrap();
+        self.rocksdb.write(batch).unwrap();
         info!("Write stage 2 done.");
     }
 
     pub fn flush(&self) {
-        self.db.flush_wal(true).unwrap();
-        self.db.flush().unwrap();
+        self.rocksdb.flush_wal(true).unwrap();
+        self.rocksdb.flush().unwrap();
     }
 }

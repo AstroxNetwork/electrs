@@ -5,7 +5,7 @@ use std::str::FromStr;
 
 use anyhow::{bail, Error};
 use bitcoin::{Address, Block, Network, OutPoint, Script};
-use serde_derive::{Deserialize, Serialize};
+use serde::{Deserialize, Serialize};
 
 use ordinals::Rune;
 

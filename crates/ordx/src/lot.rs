@@ -3,7 +3,7 @@ use std::{
     ops::{Add, AddAssign, Div, Rem, Sub, SubAssign},
 };
 
-use serde_derive::{Deserialize, Serialize};
+use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Copy, Clone, Eq, PartialEq, PartialOrd, Ord, Default, Serialize, Deserialize)]
 pub struct Lot(pub u128);

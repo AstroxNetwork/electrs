@@ -7,12 +7,14 @@ use axum::extract::{Path, Query};
 use axum::response::IntoResponse;
 use bitcoin::{Address, OutPoint, Transaction};
 use bitcoin::psbt::Psbt;
+use log::info;
 use serde_json::{json, Value};
 
 use ordinals::{Artifact, Edict, Rune, RuneId, Runestone, SpacedRune};
 
 use crate::api::dto::{AddressRuneUTXOsDTO, AppError, ExpandRuneEntry, OutputsDTO, Paged, R, RunesPageParams, RunesPSBTParams, RunesTxDTO, RunesTxParams, UTXOWithRuneValueDTO};
 use crate::api::util::hex_to_base64;
+use crate::cache::{CacheKey, CacheMethod, MokaCache};
 use crate::db::RunesDB;
 use crate::into_usize::IntoUsize;
 use crate::lot::Lot;
@@ -36,13 +38,13 @@ fn format_size(bytes: u64) -> String {
     format!("{:.2} {}", size, sizes[i])
 }
 
-pub async fn block_height(
+pub async fn stats(
     Extension(db): Extension<Arc<RunesDB>>,
 ) -> anyhow::Result<Json<R<Value>>, AppError> {
     let indexed_height = db.latest_indexed_height();
     let latest_height = db.latest_height();
     let remaining_height = latest_height.unwrap_or_default() - indexed_height.unwrap_or_default();
-    let db_size = fs_extra::dir::get_size(db.db.path())?;
+    let db_size = fs_extra::dir::get_size(db.rocksdb.path())?;
     Ok(Json(R::with_data(json!({
         "indexer": {
             "indexed_height": indexed_height,
@@ -58,6 +60,13 @@ pub async fn block_height(
         },
         "db": format_size(db_size),
     }))))
+}
+
+pub async fn block_height(
+    Extension(db): Extension<Arc<RunesDB>>,
+) -> anyhow::Result<Json<R<Option<u32>>>, AppError> {
+    let latest_height = db.latest_height();
+    Ok(Json(R::with_data(latest_height)))
 }
 
 
@@ -92,9 +101,14 @@ pub async fn get_rune_by_id(
 
 
 pub async fn paged_runes(
+    Extension(cache): Extension<Arc<MokaCache>>,
     Extension(db): Extension<Arc<RunesDB>>,
     Query(params): Query<RunesPageParams>,
-) -> impl IntoResponse {
+) -> anyhow::Result<Json<Value>, AppError> {
+    let cache_key = CacheKey::new(CacheMethod::HandlerPagedRunes, serde_json::to_value(&params)?);
+    if let Some(value) = cache.get(&cache_key).await {
+        return Ok(Json(value));
+    }
     let (next, list) = db.rune_entry_paged(
         params.cursor.unwrap_or(0).max(0),
         params.size.unwrap_or(10).clamp(1, 1000),
@@ -103,7 +117,10 @@ pub async fn paged_runes(
     );
     let latest_height = db.latest_height().unwrap_or_default();
     let runes = list.iter().map(|x| ExpandRuneEntry::load(x.0, x.1, latest_height)).collect::<Vec<_>>();
-    Json(R::with_data(Paged::new(next, runes)))
+    let r = R::with_data(Paged::new(next, runes));
+    let value = serde_json::to_value(r)?;
+    cache.insert(cache_key, value.clone()).await;
+    Ok(Json(value))
 }
 
 
@@ -405,11 +422,17 @@ pub async fn get_runes_by_rune_ids(
     Ok(Json(R::with_data(runes)))
 }
 
-pub async fn address_runes(
+pub async fn address_runes_utxos(
+    Extension(cache): Extension<Arc<MokaCache>>,
     Extension(db): Extension<Arc<RunesDB>>,
-    Path(address): Path<String>,
-) -> anyhow::Result<Json<R<AddressRuneUTXOsDTO>>, AppError> {
-    let address = Address::from_str(&address)?.assume_checked();
+    Path(address_string): Path<String>,
+) -> anyhow::Result<Json<Value>, AppError> {
+    let cache_key = CacheKey::new(CacheMethod::HandlerAddressUtxos, Value::String(address_string.clone()));
+    if let Some(value) = cache.get(&cache_key).await {
+        info!("cache hit: {}", &address_string);
+        return Ok(Json(value));
+    }
+    let address = Address::from_str(&address_string)?.assume_checked();
     let spk = address.script_pubkey();
     let entries = db.spk_to_rune_balance_entries(&spk);
     let mut runes_set = HashSet::new();
@@ -437,5 +460,9 @@ pub async fn address_runes(
         let r = db.rune_id_to_rune_entry_get(&x).unwrap();
         runes.push(ExpandRuneEntry::load(x, r, latest_height));
     }
-    Ok(Json(R::with_data(AddressRuneUTXOsDTO { utxos, runes })))
+    let r = R::with_data(AddressRuneUTXOsDTO { utxos, runes });
+    let value = serde_json::to_value(r)?;
+    cache.insert(cache_key, value.clone()).await;
+    info!("cache miss: {}", &address_string);
+    Ok(Json(value))
 }

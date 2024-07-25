@@ -3,7 +3,7 @@ use std::fmt::{Display, Formatter};
 
 use config::Config;
 use dotenv::dotenv;
-use serde_derive::{Deserialize, Serialize};
+use serde::{Deserialize, Serialize};
 
 #[derive(Default, Clone, Serialize, Deserialize, PartialEq)]
 pub struct Settings {

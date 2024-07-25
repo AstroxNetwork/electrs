@@ -60,6 +60,12 @@ impl From<fs_extra::error::Error> for AppError {
     }
 }
 
+impl From<serde_json::Error> for AppError {
+    fn from(value: serde_json::Error) -> Self {
+        AppError(value.into())
+    }
+}
+
 pub fn serialize_as_string<S, T>(value: &T, serializer: S) -> Result<S::Ok, S::Error>
 where
     S: Serializer,
@@ -350,7 +356,7 @@ pub struct RunesTxDTO {
     pub actions: Vec<String>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Serialize, Deserialize)]
 pub struct RunesPageParams {
     pub cursor: Option<usize>,
     pub size: Option<usize>,

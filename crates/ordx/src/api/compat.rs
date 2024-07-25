@@ -6,11 +6,14 @@ use std::sync::Arc;
 use axum::{Extension, Json};
 use axum::extract::Path;
 use bitcoin::{Address, Txid};
-use serde_derive::Serialize;
+use log::info;
+use serde::Serialize;
+use serde_json::Value;
 
 use ordinals::{RuneId, SpacedRune};
 
 use crate::api::dto::{AppError, serialize_as_string};
+use crate::cache::{CacheKey, CacheMethod, MokaCache};
 use crate::db::RunesDB;
 use crate::entry::RuneEntry;
 use crate::updater::RuneUpdater;
@@ -25,7 +28,6 @@ pub struct R<T> {
 
 #[derive(Debug, Serialize)]
 pub struct RuneValue {
-    pub address: String,
     #[serde(
         serialize_with = "serialize_as_string"
     )]
@@ -64,9 +66,16 @@ pub struct RuneItem {
 
 
 pub async fn address_runes(
+    Extension(cache): Extension<Arc<MokaCache>>,
     Extension(db): Extension<Arc<RunesDB>>,
     Path(address_string): Path<String>,
-) -> anyhow::Result<Json<R<RuneValue>>, AppError> {
+) -> anyhow::Result<Json<Value>, AppError> {
+    let cache_key = CacheKey::new(CacheMethod::CompatAddressUtxos, Value::String(address_string.clone()));
+    if let Some(cached) = cache.get(&cache_key).await {
+        info!("cache hit: {}", &address_string);
+        return Ok(Json(cached));
+    }
+
     let address = Address::from_str(&address_string)?.assume_checked();
     let spk = address.script_pubkey();
     let entries = db.spk_to_rune_balance_entries(&spk);
@@ -88,7 +97,6 @@ pub async fn address_runes(
                 }
             };
             items.push(RuneValue {
-                address: address_string.clone(),
                 amount: balance,
                 rune_id: id,
                 utxo: UTXO {
@@ -108,10 +116,14 @@ pub async fn address_runes(
             });
         }
     }
-    Ok(Json(R {
+    let r = R {
         status: true,
         status_code: 200,
         message: "success".to_string(),
         data: items,
-    }))
+    };
+    let value = serde_json::to_value(&r)?;
+    cache.insert(cache_key, value.clone()).await;
+    info!("cache miss: {}", &address_string);
+    Ok(Json(value))
 }
