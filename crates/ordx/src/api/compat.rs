@@ -123,7 +123,9 @@ pub async fn address_runes(
         data: items,
     };
     let value = serde_json::to_value(&r)?;
-    cache.insert(cache_key, value.clone()).await;
+    let mut cloned = value.clone();
+    cloned["cache"] = Value::Bool(true);
+    cache.insert(cache_key, cloned).await;
     info!("cache miss: {}", &address_string);
     Ok(Json(value))
 }

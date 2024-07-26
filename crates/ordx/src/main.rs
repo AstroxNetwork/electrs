@@ -9,7 +9,6 @@ use bitcoin::{OutPoint, ScriptBuf, Txid};
 use bitcoin::constants::SUBSIDY_HALVING_INTERVAL;
 use bitcoin::hashes::Hash;
 use bitcoincore_rpc::RpcApi;
-use itertools::Itertools;
 use log::{info, warn};
 use rocksdb::WriteBatch;
 

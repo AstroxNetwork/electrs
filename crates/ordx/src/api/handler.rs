@@ -119,7 +119,9 @@ pub async fn paged_runes(
     let runes = list.iter().map(|x| ExpandRuneEntry::load(x.0, x.1, latest_height)).collect::<Vec<_>>();
     let r = R::with_data(Paged::new(next, runes));
     let value = serde_json::to_value(r)?;
-    cache.insert(cache_key, value.clone()).await;
+    let mut cloned = value.clone();
+    cloned["cache"] = Value::Bool(true);
+    cache.insert(cache_key, cloned).await;
     Ok(Json(value))
 }
 
@@ -462,7 +464,9 @@ pub async fn address_runes_utxos(
     }
     let r = R::with_data(AddressRuneUTXOsDTO { utxos, runes });
     let value = serde_json::to_value(r)?;
-    cache.insert(cache_key, value.clone()).await;
+    let mut cloned = value.clone();
+    cloned["cache"] = Value::Bool(true);
+    cache.insert(cache_key, cloned).await;
     info!("cache miss: {}", &address_string);
     Ok(Json(value))
 }
