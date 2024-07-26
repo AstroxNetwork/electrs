@@ -38,7 +38,7 @@ async fn main() -> anyhow::Result<()> {
     info!("{}", &settings);
     let (rpc_client, chain) = create_bitcoincore_rpc_client(settings.clone()).unwrap();
 
-    let rocksdb_path = chain.join_with_data_dir(settings.data_dir.clone().unwrap_or("./index".to_string()).as_str()).as_path().join("rocksdb");
+    let rocksdb_path = chain.join_with_data_dir(settings.data_dir.clone().unwrap_or("./index".to_string()).as_str());
     info!("Using rocksdb at {:?}", rocksdb_path);
     let open_db = Instant::now();
     let runes_db = Arc::new(RunesDB::new(rocksdb_path));
@@ -224,7 +224,7 @@ async fn main() -> anyhow::Result<()> {
                 runes_db.height_outpoint_temp_batch_put_and_del(&mut write_batch, block_height, &outpoints);
 
                 runes_db.write_batch(write_batch).unwrap();
-                
+
                 // Clear cache
                 cache.invalidate_all();
 
