@@ -1,9 +1,11 @@
 use std::collections::HashSet;
 use std::path::Path;
+use std::time::Instant;
 
 use bitcoin::block::Header;
 use bitcoin::OutPoint;
 use bitcoin::ScriptBuf;
+use duckdb::DuckdbConnectionManager;
 use log::{error, info};
 use rocksdb::{ColumnFamily, ColumnFamilyDescriptor, DB, Error, IteratorMode, Options, WriteBatch};
 
@@ -14,6 +16,7 @@ use crate::updater::REORG_DEPTH;
 
 pub struct RunesDB {
     pub rocksdb: DB,
+    pub duckdb: r2d2::Pool<DuckdbConnectionManager>,
 }
 
 pub const HEIGHT_TO_BLOCK_HEADER: &str = "HEIGHT_TO_BLOCK_HEADER";
@@ -59,9 +62,16 @@ impl RunesDB {
             .map(|name| ColumnFamilyDescriptor::new(*name, Options::default()))
             .collect();
 
+        let rocksdb_path = path.as_ref().join("rocksdb");
+        info!("Using rocksdb at {:?}", &rocksdb_path);
+        let open_rocksdb = Instant::now();
+        let rocksdb = DB::open_cf_descriptors(&db_opts, rocksdb_path, cf_descriptors).unwrap();
+        info!("Rocksdb opened, {:?}", open_rocksdb.elapsed());
 
-        let db = DB::open_cf_descriptors(&db_opts, path, cf_descriptors).unwrap();
-        RunesDB { rocksdb: db }
+        let manager = DuckdbConnectionManager::file(path.as_ref().join("duckdb")).unwrap();
+        let pool = r2d2::Pool::new(manager).unwrap();
+
+        RunesDB { rocksdb, duckdb: pool }
     }
 
     #[inline]
@@ -677,8 +687,14 @@ impl RunesDB {
         info!("Write stage 2 done.");
     }
 
-    pub fn flush(&self) {
+    pub fn flush_rocksdb(&self) {
         self.rocksdb.flush_wal(true).unwrap();
         self.rocksdb.flush().unwrap();
+    }
+
+    pub fn create_rune_tables_on_init(&self) -> anyhow::Result<()> {
+        let conn = self.duckdb.get().unwrap();
+        conn.execute_batch(include_str!("../sql/init.sql"))?;
+        Ok(())
     }
 }

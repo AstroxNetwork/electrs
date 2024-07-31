@@ -7,7 +7,7 @@ use axum::{Extension, Json};
 use axum::extract::Path;
 use bitcoin::{Address, Txid};
 use log::info;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use ordinals::{RuneId, SpacedRune};
@@ -23,7 +23,7 @@ pub struct R<T> {
     pub status: bool,
     pub status_code: i64,
     pub message: String,
-    pub data: Vec<T>,
+    pub data: T,
 }
 
 #[derive(Debug, Serialize)]
@@ -62,6 +62,24 @@ pub struct RuneItem {
     pub rune: SpacedRune,
     pub symbol: char,
     pub timestamp: u64,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct PagedRunesParams {
+    pub offset: u64,
+    pub limit: u64,
+    #[serde(rename = "type")]
+    pub mint_type: Option<String>,
+    pub search: Option<String>,
+    pub sort: Option<String>,
+}
+
+pub async fn paged_runes(
+    Extension(cache): Extension<Arc<MokaCache>>,
+    Extension(db): Extension<Arc<RunesDB>>,
+    Path(params): Path<PagedRunesParams>,
+) -> anyhow::Result<Json<Value>, AppError> {
+    Ok(Json(Value::Null))
 }
 
 

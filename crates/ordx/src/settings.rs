@@ -18,6 +18,23 @@ pub struct Settings {
     pub ip_limit_per_mills: u64,
     pub ip_limit_burst_size: u32,
     pub concurrency_limit: usize,
+    // cache
+    #[serde(default = "default_cache_time_to_live_secs")]
+    pub cache_time_to_live_secs: u64,
+    #[serde(default = "default_cache_time_to_idle_secs")]
+    pub cache_time_to_idle_secs: u64,
+    #[serde(default = "default_cache_max_entries")]
+    pub cache_max_entries: u64,
+}
+
+fn default_cache_time_to_live_secs() -> u64 {
+    10 * 60
+}
+fn default_cache_time_to_idle_secs() -> u64 {
+    3 * 60
+}
+fn default_cache_max_entries() -> u64 {
+    8 * 1024
 }
 
 impl Display for Settings {
@@ -34,6 +51,9 @@ impl Display for Settings {
         ip_limit_per_mills: {}\n\
         ip_limit_burst_size: {}\n\
         concurrency_limit: {}\n\
+        cache_time_to_live_secs: {}\n\
+        cache_time_to_idle_secs: {}\n\
+        cache_max_entries: {}\n\
         build_version: {}\n\
         build_timestamp: {}\n\
         target_triple: {}\n\
@@ -49,6 +69,9 @@ impl Display for Settings {
                self.ip_limit_per_mills,
                self.ip_limit_burst_size,
                self.concurrency_limit,
+               self.cache_time_to_live_secs,
+               self.cache_time_to_idle_secs,
+               self.cache_max_entries,
                env!("CARGO_PKG_VERSION"),
                env!("VERGEN_BUILD_TIMESTAMP"),
                env!("VERGEN_CARGO_TARGET_TRIPLE"),

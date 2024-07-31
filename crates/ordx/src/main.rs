@@ -37,12 +37,9 @@ async fn main() -> anyhow::Result<()> {
     info!("{}", &settings);
     let (rpc_client, chain) = create_bitcoincore_rpc_client(settings.clone()).unwrap();
 
-    let rocksdb_path = chain.join_with_data_dir(settings.data_dir.clone().unwrap_or("./index".to_string()).as_str());
-    info!("Using rocksdb at {:?}", rocksdb_path);
-    let open_db = Instant::now();
-    let runes_db = Arc::new(RunesDB::new(rocksdb_path));
-    info!("DB opened, {:?}", open_db.elapsed());
-    let cache = Arc::new(create_cache());
+    let db_path = chain.join_with_data_dir(settings.data_dir.clone().unwrap_or("./index".to_string()).as_str());
+    let runes_db = Arc::new(RunesDB::new(db_path));
+    let cache = Arc::new(create_cache(&settings));
 
     let first_rune_height = {
         if chain == Chain::Testnet {
@@ -53,11 +50,10 @@ async fn main() -> anyhow::Result<()> {
         }
     };
 
-    let started_height = runes_db.latest_indexed_height().unwrap_or(first_rune_height);
+    runes_db.create_rune_tables_on_init()?;
 
-    // let reorg = Instant::now();
-    // runes_db.reorg_to_height(started_height);
-    // info!("Reorg done, {:?}", reorg.elapsed());
+
+    let started_height = runes_db.latest_indexed_height().unwrap_or(first_rune_height);
 
     let server_db = Arc::clone(&runes_db);
     let server_settings = Arc::clone(&settings);
@@ -106,7 +102,7 @@ async fn main() -> anyhow::Result<()> {
     info!("Starting from height: {}", index_height.load(Ordering::Relaxed));
     loop {
         if shutdown.load(Ordering::Relaxed) {
-            runes_db.flush();
+            runes_db.flush_rocksdb();
             warn!("Shutting down server...");
             server_handle.abort();
             let is_cancelled = server_handle.await.unwrap_err().is_cancelled();

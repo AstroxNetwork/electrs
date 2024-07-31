@@ -56,23 +56,8 @@ pub async fn create_server(settings: Arc<Settings>, runes_db: Arc<RunesDB>, cach
         .route("/runes/address/:address/utxo", get(handler::address_runes_utxos))
         // compact
         .route("/runes/utxo/:address", get(compat::address_runes))
-        ;
+        .route("/runes", get(compat::address_runes))
 
-    let network = settings.network.clone().unwrap();
-    if network != "mainnet" {
-        app = app.route(&format!("/{}/stats", network), get(handler::stats))
-            .route(&format!("/{}/rune/:id", network), get(handler::get_rune_by_id))
-            .route(&format!("/{}/runes/list", network), get(handler::paged_runes))
-            .route(&format!("/{}/runes/decode/psbt", network), post(handler::runes_decode_psbt))
-            .route(&format!("/{}/runes/decode/tx", network), post(handler::runes_decode_tx))
-            .route(&format!("/{}/runes/outputs", network), post(handler::outputs_runes))
-            .route(&format!("/{}/runes/ids", network), post(handler::get_runes_by_rune_ids))
-            .route(&format!("/{}/runes/address/:address/utxo", network), get(handler::address_runes_utxos))
-            // compact
-            .route(&format!("/{}/runes/utxo/:address", network), get(compat::address_runes))
-    };
-    
-    app = app
         .layer(GovernorLayer {
             config: governor_conf,
         })
@@ -80,7 +65,8 @@ pub async fn create_server(settings: Arc<Settings>, runes_db: Arc<RunesDB>, cach
         .layer(TraceLayer::new_for_http())
         .layer(CorsLayer::permissive())
         .layer(Extension(runes_db))
-        .layer(Extension(cache));
+        .layer(Extension(cache))
+        ;
 
     let listener = tokio::net::TcpListener::bind(&settings.api_host)
         .await?;

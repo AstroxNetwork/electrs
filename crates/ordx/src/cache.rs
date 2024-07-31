@@ -4,6 +4,8 @@ use std::time::Duration;
 use moka::future::Cache;
 use serde_json::Value;
 
+use crate::settings::Settings;
+
 #[derive(Debug, Clone)]
 pub struct CacheKey(pub CacheMethod, pub Value);
 
@@ -37,11 +39,11 @@ impl Eq for CacheKey {}
 
 pub type MokaCache = Cache<CacheKey, Value>;
 
-pub fn create_cache() -> MokaCache {
+pub fn create_cache(settings: &Settings) -> MokaCache {
     Cache::builder()
-        .max_capacity(10000)
-        .time_to_live(Duration::from_secs(60 * 10))
-        .time_to_idle(Duration::from_secs(60 * 3))
+        .max_capacity(settings.cache_max_entries)
+        .time_to_live(Duration::from_secs(settings.cache_time_to_live_secs))
+        .time_to_idle(Duration::from_secs(settings.cache_time_to_idle_secs))
         .build()
 }
 
