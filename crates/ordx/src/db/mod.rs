@@ -1,33 +1,39 @@
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::path::Path;
 use std::time::Instant;
 
 use bitcoin::block::Header;
 use bitcoin::OutPoint;
-use bitcoin::ScriptBuf;
-use duckdb::DuckdbConnectionManager;
-use log::{error, info};
+use log::info;
+use r2d2::Pool;
+use r2d2_sqlite::SqliteConnectionManager;
 use rocksdb::{ColumnFamily, ColumnFamilyDescriptor, DB, Error, IteratorMode, Options, WriteBatch};
+use rusqlite::{params, params_from_iter, ToSql};
+use rusqlite::types::ToSqlOutput;
 
 use ordinals::{Rune, RuneId};
 
-use crate::entry::{Entry, EntryBytes, OutPointValue, RuneBalanceEntry, RuneEntry, Statistic};
+use crate::db::model::{RuneBalanceForInsert, RuneBalanceForTemp, RuneBalanceForUpdate, RuneEntryForQueryInsert, RuneEntryForTemp, RuneEntryForUpdate};
+use crate::entry::{Entry, EntryBytes, RuneBalanceEntry, RuneEntry, Statistic};
 use crate::updater::REORG_DEPTH;
+
+pub mod model;
+
+type SqlitePool = Pool<SqliteConnectionManager>;
 
 pub struct RunesDB {
     pub rocksdb: DB,
-    pub duckdb: r2d2::Pool<DuckdbConnectionManager>,
+    pub sqlite: SqlitePool,
 }
 
 pub const HEIGHT_TO_BLOCK_HEADER: &str = "HEIGHT_TO_BLOCK_HEADER";
 pub const HEIGHT_TO_STATISTIC_COUNT: &str = "HEIGHT_TO_STATISTIC_COUNT";
 pub const STATISTIC_TO_VALUE: &str = "STATISTIC_TO_VALUE";
 pub const OUTPOINT_TO_RUNE_BALANCES: &str = "OUTPOINT_TO_RUNE_BALANCES";
-pub const SPK_OUTPOINT_TO_SPENT_HEIGHT: &str = "SPK_OUTPOINT_TO_SPENT_HEIGHT";
 pub const RUNE_ID_TO_RUNE_ENTRY: &str = "RUNE_ID_TO_RUNE_ENTRY";
 pub const RUNE_TO_RUNE_ID: &str = "RUNE_TO_RUNE_ID";
 
-pub const HEIGHT_OUTPOINT_TEMP: &str = "HEIGHT_OUTPOINT_TEMP";
+pub const HEIGHT_OUTPOINT_TO_RUNE_IDS: &str = "HEIGHT_OUTPOINT_TO_RUNE_IDS";
 
 pub const RUNE_ID_HEIGHT_TO_MINTS: &str = "RUNE_ID_HEIGHT_TO_MINTS";
 pub const RUNE_ID_HEIGHT_TO_BURNED: &str = "RUNE_ID_HEIGHT_TO_BURNED";
@@ -42,21 +48,20 @@ impl RunesDB {
         db_opts.create_if_missing(true);
         db_opts.create_missing_column_families(true);
         db_opts.set_compaction_style(rocksdb::DBCompactionStyle::Level);
-        db_opts.set_compression_type(rocksdb::DBCompressionType::Zstd);
+        db_opts.set_compression_type(rocksdb::DBCompressionType::Snappy);
 
         let cf_names = [
             HEIGHT_TO_BLOCK_HEADER,
             HEIGHT_TO_STATISTIC_COUNT,
             STATISTIC_TO_VALUE,
             OUTPOINT_TO_RUNE_BALANCES,
-            SPK_OUTPOINT_TO_SPENT_HEIGHT,
             RUNE_ID_TO_RUNE_ENTRY,
             RUNE_TO_RUNE_ID,
             RUNE_ID_HEIGHT_TO_MINTS,
             RUNE_ID_HEIGHT_TO_BURNED,
             RUNE_ID_TO_MINTS,
             RUNE_ID_TO_BURNED,
-            HEIGHT_OUTPOINT_TEMP,
+            HEIGHT_OUTPOINT_TO_RUNE_IDS,
         ];
         let cf_descriptors: Vec<_> = cf_names.iter()
             .map(|name| ColumnFamilyDescriptor::new(*name, Options::default()))
@@ -68,11 +73,20 @@ impl RunesDB {
         let rocksdb = DB::open_cf_descriptors(&db_opts, rocksdb_path, cf_descriptors).unwrap();
         info!("Rocksdb opened, {:?}", open_rocksdb.elapsed());
 
-        let manager = DuckdbConnectionManager::file(path.as_ref().join("duckdb")).unwrap();
-        let pool = r2d2::Pool::new(manager).unwrap();
+        let sqlite_path = path.as_ref().join("sqlite.db");
+        info!("Using sqlite at {:?}", &sqlite_path);
+        let manager = SqliteConnectionManager::file(sqlite_path);
+        let sqlite = Pool::new(manager).unwrap();
 
-        RunesDB { rocksdb, duckdb: pool }
+        RunesDB { rocksdb, sqlite }
     }
+
+    pub fn init_sqlite(&self) -> anyhow::Result<()> {
+        let conn = self.sqlite.get()?;
+        conn.execute_batch(include_str!("../../sql/init.sql"))?;
+        Ok(())
+    }
+
 
     #[inline]
     pub fn get_cf(&self, cf_name: &str) -> &ColumnFamily {
@@ -118,32 +132,34 @@ impl RunesDB {
 
 
     // specific methods
-
-    pub fn height_outpoint_temp_batch_put_and_del(&self, write_batch: &mut WriteBatch, height: u32, outpoints: &HashSet<OutPoint>) {
-        let cf = self.get_cf(HEIGHT_OUTPOINT_TEMP);
+    pub fn height_outpoint_to_rune_ids_batch_put_and_del(&self, height: u32, outpoints: &HashMap<OutPoint, HashSet<RuneId>>) {
+        let mut write_batch = WriteBatch::default();
+        let cf = self.get_cf(HEIGHT_OUTPOINT_TO_RUNE_IDS);
         let iter = self.rocksdb.iterator_cf(cf, IteratorMode::Start);
         let mut deleted = 0;
         for x in iter {
-            let (k, _) = x.unwrap();
+            let (k, v) = x.unwrap();
             let h = u32::from_be_bytes([k[0], k[1], k[2], k[3]]) as i64;
             if (height as i64) - h < (REORG_DEPTH as i64) {
                 break;
             }
+            info!("v: {:?}", v.chunks(12).map(|x| RuneId::load_bytes(x)).collect::<Vec<_>>());
             write_batch.delete_cf(cf, &k);
             deleted += 1;
         }
         if outpoints.is_empty() {
             if deleted > 0 {
-                info!("<= HEIGHT_OUTPOINT_TEMP, inserted: {}, deleted: {}", outpoints.len(), deleted);
+                info!("<= HEIGHT_OUTPOINT_TO_RUNE_IDS, inserted: {}, deleted: {}", outpoints.len(), deleted);
             }
             return;
         }
-        for outpoint in outpoints {
+        for (outpoint, value) in outpoints {
             let mut key = height.to_be_bytes().to_vec();
             key.extend_from_slice(&outpoint.store());
-            write_batch.put_cf(cf, &key, []);
+            write_batch.put_cf(cf, &key, value.iter().map(|x| x.store_bytes()).collect::<Vec<_>>().concat().as_slice());
         }
-        info!("<= HEIGHT_OUTPOINT_TEMP, inserted: {}, deleted: {}", outpoints.len(), deleted);
+        self.rocksdb.write(write_batch).unwrap();
+        info!("<= HEIGHT_OUTPOINT_TO_RUNE_IDS, inserted: {}, deleted: {}", outpoints.len(), deleted);
     }
 
     pub fn statistic_to_value_put(&self, statistic: &Statistic, value: u32) {
@@ -366,87 +382,6 @@ impl RunesDB {
             .map(|opt| opt.map(|bytes| RuneId::load_bytes(&bytes))).unwrap()
     }
 
-    pub fn spk_outpoint_to_spent_height_put(&self, key: &ScriptBuf, value: &OutPoint) {
-        let mut combined_key = key.as_bytes().to_vec();
-        combined_key.extend_from_slice(&value.store());
-        self.put(SPK_OUTPOINT_TO_SPENT_HEIGHT, &combined_key, &[]).unwrap()
-    }
-
-    pub fn spk_outpoint_to_spent_height_spent(&self, key: &ScriptBuf, value: &OutPoint, height: u32) {
-        let mut combined_key = key.as_bytes().to_vec();
-        combined_key.extend_from_slice(&value.store());
-        self.put(SPK_OUTPOINT_TO_SPENT_HEIGHT, &combined_key, &height.to_be_bytes()).unwrap()
-    }
-
-    pub fn spk_outpoint_to_spent_height_del(&self, key: &ScriptBuf, value: &OutPoint) {
-        let mut combined_key = key.as_bytes().to_vec();
-        combined_key.extend_from_slice(&value.store());
-        self.del(SPK_OUTPOINT_TO_SPENT_HEIGHT, &combined_key).unwrap()
-    }
-
-    pub fn spk_outpoint_to_batch_del_spent_height_gt_reorg_depth(&self, write_batch: &mut WriteBatch, height: u32, keys: &HashSet<ScriptBuf>) {
-        if keys.is_empty() {
-            return;
-        }
-        let cf = self.get_cf(SPK_OUTPOINT_TO_SPENT_HEIGHT);
-        let mut deleted = 0;
-        for key in keys {
-            let prefix = key.as_bytes();
-            let prefix_len = prefix.len();
-            let iter = self.rocksdb.prefix_iterator_cf(cf, prefix);
-            for x in iter {
-                let (k, v) = x.unwrap();
-
-                if prefix != &k[0..prefix_len] {
-                    break;
-                }
-
-                if v.is_empty() {
-                    continue;
-                }
-                let spent_height = u32::from_be_bytes([v[0], v[1], v[2], v[3]]) as i64;
-                if spent_height == 0 || (height as i64) - spent_height < (REORG_DEPTH as i64) {
-                    continue;
-                }
-                write_batch.delete_cf(cf, &k);
-                deleted += 1;
-            }
-        }
-        info!("<= SPK_OUTPOINT_TO_SPENT_HEIGHT, contained addresses: {}, deleted: {}", keys.len(), deleted);
-    }
-
-    pub fn spk_to_rune_balance_entries(&self, key: &ScriptBuf) -> Vec<(OutPoint, RuneBalanceEntry)> {
-        let cf = self.get_cf(SPK_OUTPOINT_TO_SPENT_HEIGHT);
-        let mut list = vec![];
-        let prefix = key.as_bytes();
-        let prefix_len = prefix.len();
-        let iter = self.rocksdb.prefix_iterator_cf(cf, prefix);
-        for x in iter {
-            let (k, v) = x.unwrap();
-
-            if prefix != &k[0..prefix_len] {
-                break;
-            }
-
-            if !v.is_empty() {
-                continue;
-            }
-            let x1 = &k[prefix_len..];
-            if x1.len() != 36 {
-                error!("Invalid outpoint length: {}", x1.len());
-                continue;
-            }
-            let mut outpoint: OutPointValue = [0; 36];
-            outpoint.copy_from_slice(x1);
-            let outpoint = OutPoint::load(outpoint);
-            if let Some(v) = self.outpoint_to_rune_balances_get(&outpoint) {
-                if v.1 == 0 {
-                    list.push((outpoint, v));
-                }
-            }
-        }
-        list
-    }
 
     pub fn height_to_block_header_put(&self, key: u32, value: &Header) {
         self.put(HEIGHT_TO_BLOCK_HEADER, &key.to_be_bytes(), &value.store_bytes()).unwrap()
@@ -516,7 +451,7 @@ impl RunesDB {
         count
     }
 
-    pub fn reorg_to_height(&self, height: u32) {
+    pub fn reorg_to_height(&self, height: u32, latest_height: u32) -> anyhow::Result<()> {
         info!("Reorg to height: {}", height);
 
         // Delete all data after height
@@ -610,13 +545,14 @@ impl RunesDB {
 
 
         info!("<= OUTPOINT_TO_RUNE_BALANCES ...");
-        let temp_cf = self.get_cf(HEIGHT_OUTPOINT_TEMP);
+        let temp_cf = self.get_cf(HEIGHT_OUTPOINT_TO_RUNE_IDS);
         let otrb_cf = self.get_cf(OUTPOINT_TO_RUNE_BALANCES);
         let iter = self.rocksdb.iterator_cf(temp_cf, IteratorMode::End);
         let mut deleted = 0;
         let mut changed = 0;
+        let mut changed_rune_ids = HashSet::new();
         for x in iter {
-            let (tk, _) = x.unwrap();
+            let (tk, v) = x.unwrap();
             let h = u32::from_be_bytes([tk[0], tk[1], tk[2], tk[3]]);
             if h >= height {
                 batch.delete_cf(temp_cf, &tk);
@@ -634,6 +570,10 @@ impl RunesDB {
                     entry.1 = 0;
                     batch.put_cf(otrb_cf, k, &entry.store_bytes());
                     changed += 1;
+                    v.chunks(12).for_each(|x| {
+                        let rune_id = RuneId::load_bytes(x);
+                        changed_rune_ids.insert(rune_id);
+                    });
                 }
             } else {
                 break;
@@ -660,31 +600,124 @@ impl RunesDB {
         info!("<= STATISTIC_TO_VALUE Statistic::ReservedRunes {}", reserved_runes_count);
 
 
+        info!("<= SQLITE: Deleting/Updating rune_balances, rune_entry ...");
+        let mut conn = self.sqlite.get().unwrap();
+        let del_rune_balance_count = conn.execute("DELETE FROM rune_balance WHERE height >= ?", params![height])?;
+        let update_rune_balance_count = conn.execute("UPDATE rune_balance SET spent_height = 0, spent_txid = null, spent_vin = null, spent_ts = null WHERE spent_height >= ?", params![height])?;
+        let del_rune_count = conn.execute("DELETE FROM rune_entry WHERE height >= ?", params![height])?;
+        info!("<= SQLITE: Deleted rune_balances {}, Updated rune_balances {}, Deleted rune_entry {}", del_rune_balance_count, update_rune_balance_count, del_rune_count);
+
+
+        info!("Write stage 2 done.");
+
+
         info!("<= RUNE_ID_TO_RUNE_ENTRY ...");
         let cf = self.get_cf(RUNE_ID_TO_RUNE_ENTRY);
         let iter = self.rocksdb.iterator_cf(cf, IteratorMode::Start);
 
         let mut runes_total = 0;
+        let mut changed_runes = HashMap::new();
         for (number, v) in iter.enumerate() {
             runes_total += 1;
+            let mut has_changed = false;
             let (k, v) = v.unwrap();
             let key = RuneId::load_bytes(&k);
-            let mut value = RuneEntry::load_bytes(&v);
+            let mut entry = RuneEntry::load_bytes(&v);
             let burned = self.rune_id_height_to_burned_sum_to_height(&key, height);
             batch.put_cf(self.get_cf(RUNE_ID_TO_BURNED), &k, burned.to_be_bytes());
-            value.burned = burned;
+
+            if entry.burned != burned {
+                entry.burned = burned;
+                has_changed = true;
+            }
+
             let mints = self.rune_id_to_mints_sum_to_height(&key, height);
             batch.put_cf(self.get_cf(RUNE_ID_TO_MINTS), &k, mints.to_be_bytes());
-            value.mints = mints;
-            value.number = number as _;
-            batch.put_cf(cf, &k, &value.store_bytes());
+
+            if entry.mints != mints {
+                entry.mints = mints;
+                has_changed = true;
+            }
+
+            let number = number as u64;
+
+            if entry.number != number {
+                entry.number = number;
+                has_changed = true;
+            }
+
+            if has_changed {
+                batch.put_cf(cf, &k, &entry.store_bytes());
+            }
+            
+            if has_changed || changed_rune_ids.contains(&key) {
+                changed_runes.insert(key.to_string(), RuneEntryForUpdate {
+                    rune_id: key.to_string(),
+                    mints: entry.mints.to_string(),
+                    burned: entry.burned.to_string(),
+                    mintable: entry.mintable(latest_height as _).unwrap_or(0) > 0,
+                });
+            }
         }
         info!("<= RUNE_ID_TO_RUNE_ENTRY {}", runes_total);
         if runes_count != runes_total {
             panic!("Runes count mismatch: {} != {}", runes_count, runes_total);
         }
         self.rocksdb.write(batch).unwrap();
-        info!("Write stage 2 done.");
+        info!("Write stage 3 done.");
+
+        info!("<= SQLITE: Updating rune entries {}", changed_runes.len());
+
+        let mut runes_txs = HashMap::new();
+        let mut runes_holders = HashMap::new();
+        if !changed_runes.is_empty() {
+            let t = Instant::now();
+            let need_update_runes = changed_runes.keys().collect::<Vec<&String>>();
+            for sub in need_update_runes.chunks(100) {
+                let placeholders = sub.iter().map(|_| "?").collect::<Vec<&str>>().join(",");
+                let sql = format!("SELECT rune_id, COUNT(DISTINCT _txid) AS txs FROM (SELECT rune_id, txid AS _txid FROM rune_balance where rune_id in ({}) UNION ALL SELECT rune_id, spent_txid AS _txid FROM rune_balance WHERE rune_id in ({}) AND spent_height > 0) AS _ GROUP BY rune_id", &placeholders, &placeholders);
+                let mut stmt = conn.prepare_cached(&sql)?;
+                stmt.query_map(params_from_iter(sub.iter().chain(sub.iter())), |row| {
+                    Ok((row.get::<_, String>(0)?, row.get::<_, u32>(1)?))
+                })?.for_each(|x| {
+                    let (rune_id, txs) = x.unwrap();
+                    runes_txs.insert(rune_id, txs);
+                });
+                let sql = format!("SELECT rune_id, COUNT(DISTINCT address) AS addresses FROM rune_balance where rune_id in ({}) and spent_height = 0 GROUP BY rune_id", &placeholders);
+                let mut stmt = conn.prepare_cached(&sql)?;
+                stmt.query_map(params_from_iter(sub.iter()), |row| {
+                    Ok((row.get::<_, String>(0)?, row.get::<_, u32>(1)?))
+                })?.for_each(|x| {
+                    let (rune_id, holders) = x.unwrap();
+                    runes_holders.insert(rune_id, holders);
+                });
+            }
+            info!("Querying {} runes txs and holders from sqlite, {:?}", need_update_runes.len(), t.elapsed());
+        }
+
+
+        let tx = conn.transaction()?;
+        let update_rune_entries: Vec<&RuneEntryForUpdate> = changed_runes.values().collect();
+
+        if !update_rune_entries.is_empty() {
+            let t = Instant::now();
+            let mut stmt = tx.prepare_cached("UPDATE rune_entry SET mintable = ?, mints = ?, burned = ?, holders = ?, transactions = ? WHERE rune_id = ?")?;
+            for entry in &update_rune_entries {
+                stmt.execute(params![
+                    entry.mintable,
+                    entry.mints,
+                    entry.burned,
+                    runes_holders.get(&entry.rune_id).unwrap_or(&0),
+                    runes_txs.get(&entry.rune_id).unwrap_or(&0),
+                    entry.rune_id,
+                ])?;
+            }
+            info!("Updating {} rune entries in sqlite, {:?}", update_rune_entries.len(), t.elapsed());
+        }
+
+        tx.commit()?;
+        info!("Write stage 4 done.");
+        Ok(())
     }
 
     pub fn flush_rocksdb(&self) {
@@ -692,9 +725,185 @@ impl RunesDB {
         self.rocksdb.flush().unwrap();
     }
 
-    pub fn create_rune_tables_on_init(&self) -> anyhow::Result<()> {
-        let conn = self.duckdb.get().unwrap();
-        conn.execute_batch(include_str!("../sql/init.sql"))?;
+
+    pub fn to_sqlite(&self, rune_temp: RuneEntryForTemp, mut balance_temp: RuneBalanceForTemp) -> anyhow::Result<()> {
+        let now = Instant::now();
+        let mut conn = self.sqlite.get()?;
+        let tx = conn.transaction()?;
+
+        let mut has_op = false;
+
+        balance_temp.update_inserts();
+        let insert_rune_balances: Vec<&RuneBalanceForInsert> = balance_temp.inserts.values().collect();
+        if !insert_rune_balances.is_empty() {
+            has_op = true;
+            let t = Instant::now();
+            for items in insert_rune_balances.chunks(1000) {
+                let mut sql = String::from(
+                    "INSERT INTO rune_balance(txid, vout, value, rune_id, rune_amount, address, premine, mint, burn, cenotaph, transfer, height, idx, ts, spent_height, spent_ts, spent_txid, spent_vin) VALUES ",
+                );
+                let mut values: Vec<&dyn ToSql> = Vec::new();
+                let len = items.len();
+                for (index, entry) in items.iter().enumerate() {
+                    sql.push_str("(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)");
+                    if index != len - 1 {
+                        sql.push(',');
+                    }
+                    values.push(&entry.txid);
+                    values.push(&entry.vout);
+                    values.push(&entry.value);
+                    values.push(&entry.rune_id);
+                    values.push(&entry.rune_amount);
+                    values.push(&entry.address);
+                    values.push(&entry.premine);
+                    values.push(&entry.mint);
+                    values.push(&entry.burn);
+                    values.push(&entry.cenotaph);
+                    values.push(&entry.transfer);
+                    values.push(&entry.height);
+                    values.push(&entry.idx);
+                    values.push(&entry.ts);
+                    values.push(&entry.spent_height);
+                    values.push(&entry.spent_ts);
+                    values.push(&entry.spent_txid);
+                    values.push(&entry.spent_vin);
+                }
+                tx.execute(&sql, values.as_slice())?;
+            }
+            info!("Inserting {} rune balances to sqlite, {:?}", insert_rune_balances.len(), t.elapsed());
+        }
+
+        let update_rune_balances: Vec<&RuneBalanceForUpdate> = balance_temp.updates.values().collect();
+        if !update_rune_balances.is_empty() {
+            has_op = true;
+            let t = Instant::now();
+            let mut stmt = tx.prepare_cached("UPDATE rune_balance SET spent_height = ?, spent_txid = ?, spent_vin = ?, spent_ts = ? WHERE txid = ? AND vout = ? AND rune_id = ?")?;
+            for entry in &update_rune_balances {
+                stmt.execute(params![
+                    entry.spent_height,
+                    entry.spent_txid,
+                    entry.spent_vin,
+                    entry.spent_ts,
+                    entry.txid,
+                    entry.vout,
+                    entry.rune_id,
+                ])?;
+            }
+            info!("Updating {} rune balances in sqlite, {:?}", update_rune_balances.len(), t.elapsed());
+        }
+
+        tx.commit()?;
+
+        let mut need_update_runes = HashSet::new();
+        for x in rune_temp.updates.values() {
+            need_update_runes.insert(x.rune_id.clone());
+        }
+        for x in rune_temp.inserts.values() {
+            if x.mints.parse::<u128>().unwrap() > 0 || x.premine.parse::<u128>().unwrap() > 0 || x.burned.parse::<u128>().unwrap() > 0 {
+                need_update_runes.insert(x.rune_id.clone());
+            }
+        }
+        let mut runes_txs = HashMap::new();
+        let mut runes_holders = HashMap::new();
+        if !need_update_runes.is_empty() {
+            has_op = true;
+            let t = Instant::now();
+            let need_update_runes = need_update_runes.into_iter().collect::<Vec<String>>();
+            for sub in need_update_runes.chunks(100) {
+                let placeholders = sub.iter().map(|_| "?").collect::<Vec<&str>>().join(",");
+                let sql = format!("SELECT rune_id, COUNT(DISTINCT _txid) AS txs FROM (SELECT rune_id, txid AS _txid FROM rune_balance where rune_id in ({}) UNION ALL SELECT rune_id, spent_txid AS _txid FROM rune_balance WHERE rune_id in ({}) AND spent_height > 0) AS _ GROUP BY rune_id", &placeholders, &placeholders);
+                let mut stmt = conn.prepare_cached(&sql)?;
+                stmt.query_map(params_from_iter(sub.iter().chain(sub.iter())), |row| {
+                    Ok((row.get::<_, String>(0)?, row.get::<_, u32>(1)?))
+                })?.for_each(|x| {
+                    let (rune_id, txs) = x.unwrap();
+                    runes_txs.insert(rune_id, txs);
+                });
+                let sql = format!("SELECT rune_id, COUNT(DISTINCT address) AS addresses FROM rune_balance where rune_id in ({}) and spent_height = 0 GROUP BY rune_id", &placeholders);
+                let mut stmt = conn.prepare_cached(&sql)?;
+                stmt.query_map(params_from_iter(sub.iter()), |row| {
+                    Ok((row.get::<_, String>(0)?, row.get::<_, u32>(1)?))
+                })?.for_each(|x| {
+                    let (rune_id, holders) = x.unwrap();
+                    runes_holders.insert(rune_id, holders);
+                });
+            }
+            info!("Querying {} runes txs and holders from sqlite, {:?}", need_update_runes.len(), t.elapsed());
+        }
+
+
+        let tx = conn.transaction()?;
+
+        let insert_rune_entries: Vec<&RuneEntryForQueryInsert> = rune_temp.inserts.values().collect();
+        if !insert_rune_entries.is_empty() {
+            has_op = true;
+            let t = Instant::now();
+            for items in insert_rune_entries.chunks(500) {
+                let mut sql = String::from(
+                    "INSERT INTO rune_entry (rune_id, etching, number, rune, spaced_rune, symbol, divisibility, premine, amount, cap, start_height, end_height, start_offset, end_offset, turbo, fairmint, height, ts, mintable, mints, burned, holders, transactions) VALUES ",
+                );
+                let mut values: Vec<ToSqlOutput> = Vec::new();
+                let len = items.len();
+                for (index, entry) in items.iter().enumerate() {
+                    sql.push_str("(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)");
+                    if index != len - 1 {
+                        sql.push(',');
+                    }
+                    values.push(entry.rune_id.to_sql()?);
+                    values.push(entry.etching.to_sql()?);
+                    values.push(entry.number.to_sql()?);
+                    values.push(entry.rune.to_sql()?);
+                    values.push(entry.spaced_rune.to_sql()?);
+                    values.push(entry.symbol.to_sql()?);
+                    values.push(entry.divisibility.to_sql()?);
+                    values.push(entry.premine.to_sql()?);
+                    values.push(entry.amount.to_sql()?);
+                    values.push(entry.cap.to_sql()?);
+                    values.push(entry.start_height.to_sql()?);
+                    values.push(entry.end_height.to_sql()?);
+                    values.push(entry.start_offset.to_sql()?);
+                    values.push(entry.end_offset.to_sql()?);
+                    values.push(entry.turbo.to_sql()?);
+                    values.push(entry.fairmint.to_sql()?);
+                    values.push(entry.height.to_sql()?);
+                    values.push(entry.ts.to_sql()?);
+                    values.push(entry.mintable.to_sql()?);
+                    values.push(entry.mints.to_sql()?);
+                    values.push(entry.burned.to_sql()?);
+                    values.push(runes_holders.get(&entry.rune_id).unwrap_or(&0).to_sql()?);
+                    values.push(runes_txs.get(&entry.rune_id).unwrap_or(&0).to_sql()?);
+                }
+                tx.execute(&sql, params_from_iter(values.iter()))?;
+            }
+            info!("Inserting {} rune entries to sqlite, {:?}", insert_rune_entries.len(), t.elapsed());
+        }
+
+        let update_rune_entries: Vec<&RuneEntryForUpdate> = rune_temp.updates.values().collect();
+
+        if !update_rune_entries.is_empty() {
+            has_op = true;
+            let t = Instant::now();
+            let mut stmt = tx.prepare_cached("UPDATE rune_entry SET mintable = ?, mints = ?, burned = ?, holders = ?, transactions = ? WHERE rune_id = ?")?;
+            for entry in &update_rune_entries {
+                stmt.execute(params![
+                    entry.mintable,
+                    entry.mints,
+                    entry.burned,
+                    runes_holders.get(&entry.rune_id).unwrap_or(&0),
+                    runes_txs.get(&entry.rune_id).unwrap_or(&0),
+                    entry.rune_id,
+                ])?;
+            }
+            info!("Updating {} rune entries in sqlite, {:?}", update_rune_entries.len(), t.elapsed());
+        }
+
+
+        tx.commit()?;
+
+        if has_op {
+            info!("Sqlite updated, {:?}", now.elapsed());
+        }
+
         Ok(())
     }
 }

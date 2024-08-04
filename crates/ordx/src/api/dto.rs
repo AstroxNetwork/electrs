@@ -66,6 +66,12 @@ impl From<serde_json::Error> for AppError {
     }
 }
 
+impl From<r2d2::Error> for AppError {
+    fn from(value: r2d2::Error) -> Self {
+        AppError(value.into())
+    }
+}
+
 pub fn serialize_as_string<S, T>(value: &T, serializer: S) -> Result<S::Ok, S::Error>
 where
     S: Serializer,

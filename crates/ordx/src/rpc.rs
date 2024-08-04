@@ -11,12 +11,16 @@ use crate::settings::Settings;
 
 pub fn create_bitcoincore_rpc_client(settings: Arc<Settings>) -> anyhow::Result<(Client, Chain)> {
     let bitcoin_rpc_url = settings.bitcoin_rpc_url.as_ref().expect("BITCOIN_RPC_URL is required");
-    let bitcoin_rpc_username = settings.bitcoin_rpc_username.as_ref().expect("BITCOIN_RPC_USERNAME is required");
-    let bitcoin_rpc_password = settings.bitcoin_rpc_password.as_ref().expect("BITCOIN_RPC_PASSWORD is required");
 
     info!("Connecting to Bitcoin Core RPC at {}", bitcoin_rpc_url);
 
-    let client = Client::new(bitcoin_rpc_url, Auth::UserPass(bitcoin_rpc_username.clone(), bitcoin_rpc_password.clone()))
+    let auth = if settings.bitcoin_rpc_username.is_none() {
+        Auth::None
+    } else {
+        Auth::UserPass(settings.bitcoin_rpc_username.clone().unwrap(), settings.bitcoin_rpc_password.clone().unwrap())
+    };
+
+    let client = Client::new(bitcoin_rpc_url, auth)
         .with_context(|| format!("Failed to connect to Bitcoin Core RPC at {}", bitcoin_rpc_url)).unwrap();
 
 

@@ -134,7 +134,7 @@ fn decode_runes_tx(db: &RunesDB, tx: Transaction) -> anyhow::Result<RunesTxDTO> 
     for (index, vin) in tx.input.iter().enumerate() {
         let point = vin.previous_output;
         if let Some(v) = db.outpoint_to_rune_balances_get(&point) {
-            let balances_buffer = v.4;
+            let balances_buffer = v.2;
             let mut balance_map = HashMap::new();
             let mut i = 0;
             while i < balances_buffer.len() {
@@ -381,7 +381,7 @@ pub async fn outputs_runes(
         let outpoint = OutPoint::from_str(&outpoint)?;
         let mut balance_map = HashMap::new();
         if let Some(v) = db.outpoint_to_rune_balances_get(&outpoint) {
-            let balances_buffer = v.4;
+            let balances_buffer = v.2;
             let mut i = 0;
             while i < balances_buffer.len() {
                 let ((id, balance), length) = RuneUpdater::decode_rune_balance(&balances_buffer[i..])?;
@@ -434,28 +434,31 @@ pub async fn address_runes_utxos(
         info!("cache hit: {}", &address_string);
         return Ok(Json(value));
     }
+
+    let conn = db.sqlite.get()?;
+    
     let address = Address::from_str(&address_string)?.assume_checked();
     let spk = address.script_pubkey();
-    let entries = db.spk_to_rune_balance_entries(&spk);
+    // let entries = db.spk_to_rune_balance_entries(&spk);
     let mut runes_set = HashSet::new();
     let mut utxos = vec![];
-    for (outpoint, entry) in entries {
-        let balances_buffer = entry.4;
-        let mut i = 0;
-        let mut balance_map = HashMap::new();
-        while i < balances_buffer.len() {
-            let ((id, balance), length) = RuneUpdater::decode_rune_balance(&balances_buffer[i..])?;
-            i += length;
-            balance_map.insert(id, balance);
-            runes_set.insert(id);
-        }
-        utxos.push(UTXOWithRuneValueDTO {
-            txid: outpoint.txid,
-            vout: outpoint.vout,
-            value: entry.2,
-            runes_value: balance_map,
-        });
-    }
+    // for (outpoint, entry) in entries {
+    //     let balances_buffer = entry;
+    //     let mut i = 0;
+    //     let mut balance_map = HashMap::new();
+    //     while i < balances_buffer.len() {
+    //         let ((id, balance), length) = RuneUpdater::decode_rune_balance(&balances_buffer[i..])?;
+    //         i += length;
+    //         balance_map.insert(id, balance);
+    //         runes_set.insert(id);
+    //     }
+    //     utxos.push(UTXOWithRuneValueDTO {
+    //         txid: outpoint.txid,
+    //         vout: outpoint.vout,
+    //         value: entry.2,
+    //         runes_value: balance_map,
+    //     });
+    // }
     let latest_height = db.latest_height().unwrap_or_default();
     let mut runes = vec![];
     for x in runes_set {

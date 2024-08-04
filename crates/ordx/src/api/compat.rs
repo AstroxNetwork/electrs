@@ -96,44 +96,44 @@ pub async fn address_runes(
 
     let address = Address::from_str(&address_string)?.assume_checked();
     let spk = address.script_pubkey();
-    let entries = db.spk_to_rune_balance_entries(&spk);
+    // let entries = db.spk_to_rune_balance_entries(&spk);
     let mut runes_map: HashMap<RuneId, RuneEntry> = HashMap::new();
-    let mut items = vec![];
-    for (outpoint, entry) in entries {
-        let balances_buffer = entry.4;
-        let mut i = 0;
-        while i < balances_buffer.len() {
-            let ((id, balance), length) = RuneUpdater::decode_rune_balance(&balances_buffer[i..])?;
-            i += length;
-            let rune_entry: RuneEntry = {
-                if let Vacant(e) = runes_map.entry(id) {
-                    let rune_entry = db.rune_id_to_rune_entry_get(&id).unwrap();
-                    e.insert(rune_entry);
-                    rune_entry
-                } else {
-                    *runes_map.get(&id).unwrap()
-                }
-            };
-            items.push(RuneValue {
-                amount: balance,
-                rune_id: id,
-                utxo: UTXO {
-                    tx_hash: outpoint.txid,
-                    vout: outpoint.vout,
-                    value: entry.2,
-                },
-                rune: RuneItem {
-                    rune_id: id,
-                    deploy_transaction: rune_entry.etching,
-                    divisibility: rune_entry.divisibility,
-                    end_block: rune_entry.block as _,
-                    rune: rune_entry.spaced_rune,
-                    symbol: rune_entry.symbol.unwrap_or('¤'),
-                    timestamp: rune_entry.timestamp,
-                },
-            });
-        }
-    }
+    let mut items:Vec<String> = vec![];
+    // for (outpoint, entry) in entries {
+    //     let balances_buffer = entry.4;
+    //     let mut i = 0;
+    //     while i < balances_buffer.len() {
+    //         let ((id, balance), length) = RuneUpdater::decode_rune_balance(&balances_buffer[i..])?;
+    //         i += length;
+    //         let rune_entry: RuneEntry = {
+    //             if let Vacant(e) = runes_map.entry(id) {
+    //                 let rune_entry = db.rune_id_to_rune_entry_get(&id).unwrap();
+    //                 e.insert(rune_entry);
+    //                 rune_entry
+    //             } else {
+    //                 *runes_map.get(&id).unwrap()
+    //             }
+    //         };
+    //         items.push(RuneValue {
+    //             amount: balance,
+    //             rune_id: id,
+    //             utxo: UTXO {
+    //                 tx_hash: outpoint.txid,
+    //                 vout: outpoint.vout,
+    //                 value: entry.2,
+    //             },
+    //             rune: RuneItem {
+    //                 rune_id: id,
+    //                 deploy_transaction: rune_entry.etching,
+    //                 divisibility: rune_entry.divisibility,
+    //                 end_block: rune_entry.block as _,
+    //                 rune: rune_entry.spaced_rune,
+    //                 symbol: rune_entry.symbol.unwrap_or('¤'),
+    //                 timestamp: rune_entry.timestamp,
+    //             },
+    //         });
+    //     }
+    // }
     let r = R {
         status: true,
         status_code: 200,

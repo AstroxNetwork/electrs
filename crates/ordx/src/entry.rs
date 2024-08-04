@@ -169,6 +169,10 @@ pub struct RuneEntry {
 
 
 impl RuneEntry {
+    pub fn fairmint(&self) -> bool {
+        self.terms.is_none()
+    }
+
     pub fn mintable(&self, height: u64) -> Result<u128, MintError> {
         let Some(terms) = self.terms else {
             return Err(MintError::Unmintable);
@@ -441,17 +445,16 @@ pub enum OutpointStatus {
     Unspent = 1,
 }
 
+
 // (confirmed_height, spent_height, sat, spk, rune_balance)
-pub type RuneBalanceEntry = (u32, u32, u64, Vec<u8>, Vec<u8>);
+pub type RuneBalanceEntry = (u32, u32, Vec<u8>);
 
 impl Entry for RuneBalanceEntry {
-    type Value = (u32, u32, u64, Vec<u8>, Vec<u8>);
-    fn load((confirmed_height, spent_height, sat, spk, rune_balance): Self::Value) -> Self {
+    type Value = (u32, u32, Vec<u8>);
+    fn load((confirmed_height, spent_height, rune_balance): Self::Value) -> Self {
         (
             confirmed_height,
             spent_height,
-            sat,
-            spk,
             rune_balance,
         )
     }
@@ -460,8 +463,6 @@ impl Entry for RuneBalanceEntry {
             self.0,
             self.1,
             self.2,
-            self.3,
-            self.4,
         )
     }
 }

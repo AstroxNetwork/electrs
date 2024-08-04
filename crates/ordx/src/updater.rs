@@ -1,12 +1,14 @@
 use std::collections::{HashMap, HashSet};
 use std::time::Duration;
 
-use bitcoin::{OutPoint, ScriptBuf, Transaction, Txid};
+use bitcoin::{Address, Network, OutPoint, Transaction, Txid};
 use bitcoincore_rpc::{Client, RpcApi};
+use hex::ToHex;
 use log::info;
 
 use ordinals::*;
 
+use crate::db::model::{RuneBalanceForInsert, RuneBalanceForTemp, RuneBalanceForUpdate, RuneBalanceKey, RuneEntryForQueryInsert, RuneEntryForTemp, RuneEntryForUpdate, RuneOpType};
 use crate::db::RunesDB;
 use crate::entry::*;
 use crate::into_usize::IntoUsize;
@@ -22,11 +24,14 @@ pub struct RuneUpdater<'a, > {
     pub burned: HashMap<RuneId, Lot>,
     pub client: &'a Client,
     pub height: u32,
+    pub latest_height: u32,
+    pub network: Network,
     pub minimum: Rune,
     pub runes: u32,
     pub runes_db: &'a RunesDB,
-    pub block_spks: &'a mut HashSet<ScriptBuf>,
-    pub block_outpoints: &'a mut HashSet<OutPoint>,
+    pub outpoint_to_rune_ids: &'a mut HashMap<OutPoint, HashSet<RuneId>>,
+    pub rune_entry_temp: &'a mut RuneEntryForTemp,
+    pub rune_balance_temp: &'a mut RuneBalanceForTemp,
 }
 
 impl<'a> RuneUpdater<'a> {
@@ -38,13 +43,13 @@ impl<'a> RuneUpdater<'a> {
         let txid = tx.txid();
         let artifact = Runestone::decipher(tx);
 
-        let mut unallocated = self.unallocated(tx)?;
+        let mut unallocated = self.unallocated(&txid, tx)?;
 
         let mut allocated: Vec<HashMap<RuneId, Lot>> = vec![HashMap::new(); tx.output.len()];
 
         if let Some(artifact) = &artifact {
             if let Some(id) = artifact.mint() {
-                if let Some(amount) = self.mint(id)? {
+                if let Some(amount) = self.mint(&txid, id)? {
                     *unallocated.entry(id).or_default() += amount;
                 }
             }
@@ -53,8 +58,11 @@ impl<'a> RuneUpdater<'a> {
 
             if let Artifact::Runestone(runestone) = artifact {
                 if let Some((id, ..)) = etched {
-                    *unallocated.entry(id).or_default() +=
-                        runestone.etching.unwrap().premine.unwrap_or_default();
+                    let premine = runestone.etching.unwrap().premine.unwrap_or_default();
+                    *unallocated.entry(id).or_default() += premine;
+                    if premine > 0 {
+                        self.rune_balance_temp.insert_tx_op(txid.to_string(), RuneOpType::Premine);
+                    }
                 }
 
                 for Edict { id, amount, output } in runestone.edicts.iter().copied() {
@@ -138,8 +146,15 @@ impl<'a> RuneUpdater<'a> {
         let mut burned: HashMap<RuneId, Lot> = HashMap::new();
 
         if let Some(Artifact::Cenotaph(_)) = artifact {
+            let mut cenotaph = false;
             for (id, balance) in unallocated {
                 *burned.entry(id).or_default() += balance;
+                if balance > 0 {
+                    cenotaph = true;
+                }
+            }
+            if cenotaph {
+                self.rune_balance_temp.insert_tx_op(txid.to_string(), RuneOpType::Cenotaph);
             }
         } else {
             let pointer = artifact
@@ -168,10 +183,15 @@ impl<'a> RuneUpdater<'a> {
                     }
                 }
             } else {
+                let mut burn = false;
                 for (id, balance) in unallocated {
                     if balance > 0 {
                         *burned.entry(id).or_default() += balance;
+                        burn = true;
                     }
+                }
+                if burn {
+                    self.rune_balance_temp.insert_tx_op(txid.to_string(), RuneOpType::Burn);
                 }
             }
         }
@@ -203,17 +223,44 @@ impl<'a> RuneUpdater<'a> {
                 vout: vout.try_into().unwrap(),
             };
 
+            let address = match Address::from_script(&tx.output[vout].script_pubkey, self.network) {
+                Ok(v) => v.to_string(),
+                Err(_) => tx.output[vout].script_pubkey.to_bytes().encode_hex(),
+            };
 
+            let rune_ids = self.outpoint_to_rune_ids.entry(outpoint).or_default();
             for (id, balance) in balances {
+                let key = RuneBalanceKey {
+                    txid: txid.to_string(),
+                    vout: vout as _,
+                    rune_id: id.to_string(),
+                };
+                self.rune_balance_temp.insert(key, RuneBalanceForInsert {
+                    height: self.height,
+                    idx: tx_index,
+                    txid: txid.to_string(),
+                    vout: vout as _,
+                    value: tx.output[vout].value.to_sat(),
+                    rune_id: id.to_string(),
+                    rune_amount: balance.n().to_string(),
+                    address: address.clone(),
+                    ts: self.block_time,
+                    premine: false,
+                    mint: false,
+                    burn: false,
+                    cenotaph: false,
+                    transfer: false,
+                    spent_height: 0,
+                    spent_txid: None,
+                    spent_vin: None,
+                    spent_ts: None,
+                });
                 Self::encode_rune_balance(id, balance.n(), &mut buffer);
+                rune_ids.insert(id);
             }
 
-            let sat = tx.output[vout].value.to_sat();
-            let balance: RuneBalanceEntry = (self.height, 0, sat, tx.output[vout].script_pubkey.to_bytes(), buffer.clone());
+            let balance: RuneBalanceEntry = (self.height, 0, buffer.clone());
             self.runes_db.outpoint_to_rune_balances_put(&outpoint, balance);
-            self.runes_db.spk_outpoint_to_spent_height_put(&tx.output[vout].script_pubkey, &outpoint);
-            
-            self.block_outpoints.insert(outpoint);
         }
 
         // increment entries with burned runes
@@ -299,7 +346,34 @@ impl<'a> RuneUpdater<'a> {
         };
 
         self.runes_db.rune_id_to_rune_entry_put(&id, &entry);
-        info!("New RUNE: {}({}, {})", entry.spaced_rune, id, number);
+        info!("New RUNE: {}({}, {})", entry.spaced_rune, &id, number);
+
+        self.rune_entry_temp.insert(&id, RuneEntryForQueryInsert {
+            rune_id: id.to_string(),
+            etching: entry.etching.to_string(),
+            number: entry.number,
+            rune: entry.spaced_rune.rune.to_string(),
+            spaced_rune: entry.spaced_rune.to_string(),
+            symbol: entry.symbol.map(|s| s.to_string()),
+            divisibility: entry.divisibility,
+            premine: entry.premine.to_string(),
+            amount: entry.terms.and_then(|t| t.amount).map(|a| a.to_string()),
+            cap: entry.terms.and_then(|t| t.cap).map(|c| c.to_string()),
+            start_height: entry.terms.and_then(|t| t.height.0).map(|s| s as _),
+            end_height: entry.terms.and_then(|t| t.height.1).map(|e| e as _),
+            start_offset: entry.terms.and_then(|t| t.offset.0).map(|s| s as _),
+            end_offset: entry.terms.and_then(|t| t.offset.1).map(|e| e as _),
+            mints: entry.mints.to_string(),
+            turbo: entry.turbo,
+            burned: entry.burned.to_string(),
+            mintable: entry.mintable(self.latest_height as _).unwrap_or(0) > 0,
+            fairmint: entry.fairmint(),
+            holders: 0,
+            transactions: 0,
+            height: self.height,
+            ts: self.block_time,
+        });
+
         Ok(())
     }
 
@@ -345,7 +419,7 @@ impl<'a> RuneUpdater<'a> {
         )))
     }
 
-    fn mint(&mut self, id: RuneId) -> Result<Option<Lot>> {
+    fn mint(&mut self, txid: &Txid, id: RuneId) -> Result<Option<Lot>> {
         let Some(entry) = self.runes_db.rune_id_to_rune_entry_get(&id) else {
             return Ok(None);
         };
@@ -361,6 +435,15 @@ impl<'a> RuneUpdater<'a> {
         rune_entry.mints = self.runes_db.rune_id_to_mints_inc(&id);
 
         self.runes_db.rune_id_to_rune_entry_put(&id, &rune_entry);
+
+        self.rune_balance_temp.insert_tx_op(txid.to_string(), RuneOpType::Mint);
+
+        self.rune_entry_temp.try_update(id, RuneEntryForUpdate {
+            rune_id: id.to_string(),
+            mints: rune_entry.mints.to_string(),
+            burned: rune_entry.burned.to_string(),
+            mintable: rune_entry.mintable(self.latest_height as _).unwrap_or(0) > 0,
+        });
 
         Ok(Some(Lot(amount)))
     }
@@ -437,31 +520,44 @@ impl<'a> RuneUpdater<'a> {
         Ok(false)
     }
 
-    fn unallocated(&mut self, tx: &Transaction) -> Result<HashMap<RuneId, Lot>> {
+    fn unallocated(&mut self, txid: &Txid, tx: &Transaction) -> Result<HashMap<RuneId, Lot>> {
         // map of rune ID to un-allocated balance of that rune
         let mut unallocated: HashMap<RuneId, Lot> = HashMap::new();
 
         // increment unallocated runes with the runes in tx inputs
-        for input in &tx.input {
+        for (index, input) in tx.input.iter().enumerate() {
             if let Some(mut entry) = self
                 .runes_db.outpoint_to_rune_balances_get(&input.previous_output)
             {
-                let buffer = &entry.4;
+                let buffer = &entry.2;
+                let mut rune_ids = self.outpoint_to_rune_ids.entry(input.previous_output).or_default();
                 let mut i = 0;
                 while i < buffer.len() {
                     let ((id, balance), len) = Self::decode_rune_balance(&buffer[i..]).unwrap();
                     i += len;
                     *unallocated.entry(id).or_default() += balance;
+                    let key = RuneBalanceKey {
+                        txid: input.previous_output.txid.to_string(),
+                        vout: input.previous_output.vout,
+                        rune_id: id.to_string(),
+                    };
+                    self.rune_balance_temp.try_update(&key, RuneBalanceForUpdate {
+                        txid: key.txid.clone(),
+                        vout: key.vout,
+                        rune_id: key.rune_id.clone(),
+                        spent_vin: index as _,
+                        spent_txid: txid.to_string(),
+                        spent_height: self.height,
+                        spent_ts: self.block_time,
+                    });
+                    rune_ids.insert(id);
                 }
 
-                let spk = ScriptBuf::from_bytes(entry.3.to_vec());
-                self.runes_db.spk_outpoint_to_spent_height_spent(&spk, &input.previous_output, self.height);
 
                 entry.1 = self.height;
                 self.runes_db.outpoint_to_rune_balances_put(&input.previous_output, entry);
 
-                self.block_spks.insert(spk);
-                self.block_outpoints.insert(input.previous_output);
+                self.rune_balance_temp.insert_tx_op(txid.to_string(), RuneOpType::Transfer);
             }
         }
 

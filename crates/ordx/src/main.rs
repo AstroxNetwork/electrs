@@ -5,17 +5,17 @@ use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::thread;
 use std::time::{Duration, Instant};
 
-use bitcoin::{OutPoint, ScriptBuf, Txid};
+use bitcoin::{OutPoint, Txid};
 use bitcoin::constants::SUBSIDY_HALVING_INTERVAL;
 use bitcoin::hashes::Hash;
 use bitcoincore_rpc::RpcApi;
 use log::{info, warn};
-use rocksdb::WriteBatch;
 
 use ordinals::{Height, Rune, RuneId, SpacedRune, Terms};
 use ordx::api::create_server;
 use ordx::cache::create_cache;
 use ordx::chain::Chain;
+use ordx::db::model::{RuneBalanceForTemp, RuneEntryForTemp};
 use ordx::db::RunesDB;
 use ordx::entry::{RuneEntry, Statistic};
 use ordx::rpc::{create_bitcoincore_rpc_client, with_retry};
@@ -37,8 +37,10 @@ async fn main() -> anyhow::Result<()> {
     info!("{}", &settings);
     let (rpc_client, chain) = create_bitcoincore_rpc_client(settings.clone()).unwrap();
 
-    let db_path = chain.join_with_data_dir(settings.data_dir.clone().unwrap_or("./index".to_string()).as_str());
+    let db_path = chain.join_with_data_dir(settings.data_dir.clone().unwrap_or("./data".to_string()).as_str());
     let runes_db = Arc::new(RunesDB::new(db_path));
+    runes_db.init_sqlite()?;
+
     let cache = Arc::new(create_cache(&settings));
 
     let first_rune_height = {
@@ -50,10 +52,7 @@ async fn main() -> anyhow::Result<()> {
         }
     };
 
-    runes_db.create_rune_tables_on_init()?;
-
-
-    let started_height = runes_db.latest_indexed_height().unwrap_or(first_rune_height);
+    let started_height = runes_db.latest_indexed_height().map(|x| x + 1).unwrap_or(first_rune_height);
 
     let server_db = Arc::clone(&runes_db);
     let server_settings = Arc::clone(&settings);
@@ -94,13 +93,13 @@ async fn main() -> anyhow::Result<()> {
         }
     }
 
-
     let start_timestamp = Instant::now();
 
     let reorg_height = AtomicU32::new(0);
     let index_height = AtomicU32::new(started_height);
     info!("Starting from height: {}", index_height.load(Ordering::Relaxed));
     loop {
+        info!("================================================================================");
         if shutdown.load(Ordering::Relaxed) {
             runes_db.flush_rocksdb();
             warn!("Shutting down server...");
@@ -174,28 +173,32 @@ async fn main() -> anyhow::Result<()> {
                     }
                     warn!("Reorg detected, resetting to height: {}", curr_reorg_height);
                     let start = Instant::now();
-                    runes_db.reorg_to_height(curr_reorg_height);
+                    runes_db.reorg_to_height(curr_reorg_height, latest_height)?;
                     let elapsed = start.elapsed();
                     warn!("Reorg done, {:?}", elapsed);
                     reorg_height.store(0, Ordering::Relaxed);
                 }
                 let updater_timestamp = Instant::now();
                 let runes_num_before = runes_db.statistic_to_value_get(&Statistic::Runes).unwrap_or_default();
-                let mut spks: HashSet<ScriptBuf> = HashSet::new();
-                let mut outpoints: HashSet<OutPoint> = HashSet::new();
+                let mut outpoint_to_rune_ids = HashMap::new();
+                let mut rune_entry_temp = RuneEntryForTemp::default();
+                let mut rune_balance_temp = RuneBalanceForTemp::default();
                 let mut rune_updater = RuneUpdater {
                     block_time: block.header.time,
+                    network: chain.network(),
                     burned: HashMap::new(),
                     client: &rpc_client,
                     height: block_height,
+                    latest_height,
                     minimum: Rune::minimum_at_height(
                         chain.network(),
                         Height(block_height),
                     ),
                     runes: runes_num_before,
                     runes_db: &runes_db,
-                    block_spks: &mut spks,
-                    block_outpoints: &mut outpoints,
+                    outpoint_to_rune_ids: &mut outpoint_to_rune_ids,
+                    rune_entry_temp: &mut rune_entry_temp,
+                    rune_balance_temp: &mut rune_balance_temp,
                 };
                 for (i, tx) in block.txdata.iter().enumerate() {
                     rune_updater.index_runes(u32::try_from(i).unwrap(), tx).await.unwrap();
@@ -210,15 +213,9 @@ async fn main() -> anyhow::Result<()> {
                 }
                 runes_db.height_to_block_header_put(block_height, &block.header);
 
-                let mut write_batch = WriteBatch::default();
+                runes_db.height_outpoint_to_rune_ids_batch_put_and_del(block_height, &outpoint_to_rune_ids);
 
-                // Delete spent outpoints
-                runes_db.spk_outpoint_to_batch_del_spent_height_gt_reorg_depth(&mut write_batch, block_height, &spks);
-
-                // Delete spent outpoints
-                runes_db.height_outpoint_temp_batch_put_and_del(&mut write_batch, block_height, &outpoints);
-
-                runes_db.write_batch(write_batch).unwrap();
+                runes_db.to_sqlite(rune_entry_temp, rune_balance_temp)?;
 
                 // Clear cache
                 cache.invalidate_all();
