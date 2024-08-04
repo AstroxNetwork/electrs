@@ -133,32 +133,32 @@ impl RunesDB {
 
     // specific methods
     pub fn height_outpoint_to_rune_ids_batch_put_and_del(&self, height: u32, outpoints: &HashMap<OutPoint, HashSet<RuneId>>) {
-        let mut write_batch = WriteBatch::default();
+        let mut batch = WriteBatch::default();
         let cf = self.get_cf(HEIGHT_OUTPOINT_TO_RUNE_IDS);
         let iter = self.rocksdb.iterator_cf(cf, IteratorMode::Start);
         let mut deleted = 0;
         for x in iter {
-            let (k, v) = x.unwrap();
+            let (k, _) = x.unwrap();
             let h = u32::from_be_bytes([k[0], k[1], k[2], k[3]]) as i64;
             if (height as i64) - h < (REORG_DEPTH as i64) {
                 break;
             }
-            info!("v: {:?}", v.chunks(12).map(|x| RuneId::load_bytes(x)).collect::<Vec<_>>());
-            write_batch.delete_cf(cf, &k);
+            batch.delete_cf(cf, &k);
             deleted += 1;
         }
         if outpoints.is_empty() {
             if deleted > 0 {
                 info!("<= HEIGHT_OUTPOINT_TO_RUNE_IDS, inserted: {}, deleted: {}", outpoints.len(), deleted);
+                self.rocksdb.write(batch).unwrap();
             }
             return;
         }
         for (outpoint, value) in outpoints {
             let mut key = height.to_be_bytes().to_vec();
             key.extend_from_slice(&outpoint.store());
-            write_batch.put_cf(cf, &key, value.iter().map(|x| x.store_bytes()).collect::<Vec<_>>().concat().as_slice());
+            batch.put_cf(cf, &key, value.iter().map(|x| x.store_bytes()).collect::<Vec<_>>().concat().as_slice());
         }
-        self.rocksdb.write(write_batch).unwrap();
+        self.rocksdb.write(batch).unwrap();
         info!("<= HEIGHT_OUTPOINT_TO_RUNE_IDS, inserted: {}, deleted: {}", outpoints.len(), deleted);
     }
 
@@ -649,7 +649,7 @@ impl RunesDB {
             if has_changed {
                 batch.put_cf(cf, &k, &entry.store_bytes());
             }
-            
+
             if has_changed || changed_rune_ids.contains(&key) {
                 changed_runes.insert(key.to_string(), RuneEntryForUpdate {
                     rune_id: key.to_string(),
