@@ -1,14 +1,15 @@
 use std::collections::{HashMap, HashSet};
+use std::fmt::Debug;
 use std::path::Path;
 use std::time::Instant;
 
 use bitcoin::block::Header;
 use bitcoin::OutPoint;
 use log::info;
-use r2d2::Pool;
+use r2d2::{CustomizeConnection, Pool};
 use r2d2_sqlite::SqliteConnectionManager;
 use rocksdb::{ColumnFamily, ColumnFamilyDescriptor, DB, Error, IteratorMode, Options, WriteBatch};
-use rusqlite::{params, params_from_iter, ToSql};
+use rusqlite::{Connection, params, params_from_iter, ToSql};
 use rusqlite::types::ToSqlOutput;
 
 use ordinals::{Rune, RuneId};
@@ -18,6 +19,18 @@ use crate::entry::{Entry, EntryBytes, RuneBalanceEntry, RuneEntry, Statistic};
 use crate::updater::REORG_DEPTH;
 
 pub mod model;
+
+#[derive(Copy, Clone, Debug)]
+struct Customizer;
+
+
+impl CustomizeConnection<Connection, rusqlite::Error> for Customizer {
+    fn on_acquire(&self, conn: &mut Connection) -> Result<(), rusqlite::Error> {
+        let ok = conn.execute_batch(include_str!("../../sql/pragma.sql")).is_ok();
+        info!("Acquired connection: {}", ok);
+        Ok(())
+    }
+}
 
 type SqlitePool = Pool<SqliteConnectionManager>;
 
@@ -76,8 +89,12 @@ impl RunesDB {
         let sqlite_path = path.as_ref().join("sqlite.db");
         info!("Using sqlite at {:?}", &sqlite_path);
         let manager = SqliteConnectionManager::file(sqlite_path);
-        let sqlite = Pool::new(manager).unwrap();
-
+        let sqlite = Pool::builder()
+            .min_idle(Some(1))
+            .max_size(100)
+            .connection_customizer(Box::new(Customizer))
+            .build(manager)
+            .unwrap();
         RunesDB { rocksdb, sqlite }
     }
 
@@ -552,7 +569,7 @@ impl RunesDB {
         let mut changed = 0;
         let mut changed_rune_ids = HashSet::new();
         for x in iter {
-            let (tk, v) = x.unwrap();
+            let (tk, _) = x.unwrap();
             let h = u32::from_be_bytes([tk[0], tk[1], tk[2], tk[3]]);
             if h >= height {
                 batch.delete_cf(temp_cf, &tk);
