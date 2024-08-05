@@ -748,6 +748,8 @@ impl RunesDB {
         let mut conn = self.sqlite.get()?;
         let tx = conn.transaction()?;
 
+        let mut need_update_runes = HashSet::new();
+
         let mut has_op = false;
 
         balance_temp.update_inserts();
@@ -784,6 +786,7 @@ impl RunesDB {
                     values.push(&entry.spent_ts);
                     values.push(&entry.spent_txid);
                     values.push(&entry.spent_vin);
+                    need_update_runes.insert(entry.rune_id.clone());
                 }
                 tx.execute(&sql, values.as_slice())?;
             }
@@ -805,13 +808,13 @@ impl RunesDB {
                     entry.vout,
                     entry.rune_id,
                 ])?;
+                need_update_runes.insert(entry.rune_id.clone());
             }
             info!("Updating {} rune balances in sqlite, {:?}", update_rune_balances.len(), t.elapsed());
         }
 
         tx.commit()?;
 
-        let mut need_update_runes = HashSet::new();
         for x in rune_temp.updates.values() {
             need_update_runes.insert(x.rune_id.clone());
         }
@@ -825,9 +828,10 @@ impl RunesDB {
         if !need_update_runes.is_empty() {
             has_op = true;
             let t = Instant::now();
-            let need_update_runes = need_update_runes.into_iter().collect::<Vec<String>>();
+            let need_update_runes = need_update_runes.clone().into_iter().collect::<Vec<String>>();
             for sub in need_update_runes.chunks(100) {
                 let placeholders = sub.iter().map(|_| "?").collect::<Vec<&str>>().join(",");
+                let t = Instant::now();
                 let sql = format!("SELECT rune_id, COUNT(DISTINCT _txid) AS txs FROM (SELECT rune_id, txid AS _txid FROM rune_balance where rune_id in ({}) UNION ALL SELECT rune_id, spent_txid AS _txid FROM rune_balance WHERE rune_id in ({}) AND spent_height > 0) AS _ GROUP BY rune_id", &placeholders, &placeholders);
                 let mut stmt = conn.prepare_cached(&sql)?;
                 stmt.query_map(params_from_iter(sub.iter().chain(sub.iter())), |row| {
@@ -836,6 +840,8 @@ impl RunesDB {
                     let (rune_id, txs) = x.unwrap();
                     runes_txs.insert(rune_id, txs);
                 });
+                info!("Querying {} runes txs from sqlite, {:?}", sub.len(), t.elapsed());
+                let t = Instant::now();
                 let sql = format!("SELECT rune_id, COUNT(DISTINCT address) AS addresses FROM rune_balance where rune_id in ({}) and spent_height = 0 GROUP BY rune_id", &placeholders);
                 let mut stmt = conn.prepare_cached(&sql)?;
                 stmt.query_map(params_from_iter(sub.iter()), |row| {
@@ -844,12 +850,15 @@ impl RunesDB {
                     let (rune_id, holders) = x.unwrap();
                     runes_holders.insert(rune_id, holders);
                 });
+                info!("Querying {} runes holders from sqlite, {:?}", sub.len(), t.elapsed());
             }
             info!("Querying {} runes txs and holders from sqlite, {:?}", need_update_runes.len(), t.elapsed());
         }
 
 
         let tx = conn.transaction()?;
+
+        let mut used_rune_ids = HashSet::new();
 
         let insert_rune_entries: Vec<&RuneEntryForQueryInsert> = rune_temp.inserts.values().collect();
         if !insert_rune_entries.is_empty() {
@@ -889,6 +898,7 @@ impl RunesDB {
                     values.push(entry.burned.to_sql()?);
                     values.push(runes_holders.get(&entry.rune_id).unwrap_or(&0).to_sql()?);
                     values.push(runes_txs.get(&entry.rune_id).unwrap_or(&0).to_sql()?);
+                    used_rune_ids.insert(entry.rune_id.clone());
                 }
                 tx.execute(&sql, params_from_iter(values.iter()))?;
             }
@@ -897,9 +907,10 @@ impl RunesDB {
 
         let update_rune_entries: Vec<&RuneEntryForUpdate> = rune_temp.updates.values().collect();
 
+        let t = Instant::now();
+        let mut updated_rune_count = 0;
         if !update_rune_entries.is_empty() {
             has_op = true;
-            let t = Instant::now();
             let mut stmt = tx.prepare_cached("UPDATE rune_entry SET mintable = ?, mints = ?, burned = ?, holders = ?, transactions = ? WHERE rune_id = ?")?;
             for entry in &update_rune_entries {
                 stmt.execute(params![
@@ -910,8 +921,29 @@ impl RunesDB {
                     runes_txs.get(&entry.rune_id).unwrap_or(&0),
                     entry.rune_id,
                 ])?;
+                used_rune_ids.insert(entry.rune_id.clone());
+                updated_rune_count += 1;
             }
-            info!("Updating {} rune entries in sqlite, {:?}", update_rune_entries.len(), t.elapsed());
+        }
+
+        {
+            let mut stmt = tx.prepare_cached("UPDATE rune_entry SET holders = ?, transactions = ? WHERE rune_id = ?")?;
+            for rune_id in need_update_runes {
+                if used_rune_ids.contains(&rune_id) {
+                    continue;
+                }
+                has_op = true;
+                stmt.execute(params![
+                    runes_holders.get(&rune_id).unwrap_or(&0),
+                    runes_txs.get(&rune_id).unwrap_or(&0),
+                    rune_id,
+                ])?;
+                updated_rune_count += 1;
+            }
+        }
+
+        if updated_rune_count > 0 {
+            info!("Updating {} rune entries in sqlite, {:?}", updated_rune_count, t.elapsed());
         }
 
 
