@@ -5,6 +5,7 @@ use bitcoin::{consensus, OutPoint, Txid};
 use bitcoin::block::Header;
 use bitcoin::consensus::{Decodable, Encodable};
 use bitcoin::hashes::Hash;
+use log::info;
 use serde::{Deserialize, Serialize};
 
 use ordinals::*;
@@ -407,6 +408,7 @@ impl Entry for RuneId {
 
 impl EntryBytes for RuneId {
     fn load_bytes(bytes: &[u8]) -> Self {
+        info!("load_bytes {:?}", bytes);
         let block = u64::from_be_bytes(bytes[0..8].try_into().unwrap());
         let tx = u32::from_be_bytes(bytes[8..12].try_into().unwrap());
         Self::load((block, tx))

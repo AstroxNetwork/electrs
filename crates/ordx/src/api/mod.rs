@@ -19,12 +19,13 @@ use crate::cache::MokaCache;
 use crate::db::RunesDB;
 use crate::settings::Settings;
 
-mod ip;
-mod handler;
-mod dto;
-mod error;
-mod util;
-mod compat;
+pub mod ip;
+pub mod handler;
+pub mod dto;
+pub mod error;
+pub mod util;
+pub mod compat;
+pub mod vo;
 
 pub async fn create_server(settings: Arc<Settings>, runes_db: Arc<RunesDB>, cache: Arc<MokaCache>) -> anyhow::Result<()> {
     let governor_conf = Arc::new(
@@ -53,6 +54,7 @@ pub async fn create_server(settings: Arc<Settings>, runes_db: Arc<RunesDB>, cach
         .route("/runes/decode/tx", post(handler::runes_decode_tx))
         .route("/runes/outputs", post(handler::outputs_runes))
         .route("/runes/ids", post(handler::get_runes_by_rune_ids))
+        .route("/runes/tx/:txid", get(handler::get_tx))
         .route("/runes/address/:address/utxo", get(handler::address_runes_utxos))
         // compact
         .route("/runes/utxo/:address", get(compat::address_runes))

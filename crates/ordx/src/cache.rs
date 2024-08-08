@@ -11,9 +11,12 @@ pub struct CacheKey(pub CacheMethod, pub Value);
 
 #[derive(Debug, Clone, Hash, Eq, PartialEq)]
 pub enum CacheMethod {
-    HandlerAddressUtxos = 0,
-    CompatAddressUtxos = 1,
-    HandlerPagedRunes = 2,
+    HandlerAddressUtxos,
+    CompatAddressUtxos,
+    HandlerPagedRunes,
+    HandlerRuneById,
+    HandlerTx,
+    CompatPagedRunes,
 }
 
 impl CacheKey {

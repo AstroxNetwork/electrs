@@ -9,6 +9,7 @@ use serde::ser::{SerializeMap, SerializeSeq};
 
 use ordinals::{RuneId, SpacedRune};
 
+use crate::db::model::RuneEntryForQueryInsert;
 use crate::entry::RuneEntry;
 use crate::lot::Lot;
 
@@ -68,6 +69,17 @@ impl From<serde_json::Error> for AppError {
 
 impl From<r2d2::Error> for AppError {
     fn from(value: r2d2::Error) -> Self {
+        AppError(value.into())
+    }
+}
+impl From<rusqlite::Error> for AppError {
+    fn from(value: rusqlite::Error) -> Self {
+        AppError(value.into())
+    }
+}
+
+impl From<bitcoin::hex::HexToArrayError> for AppError {
+    fn from(value: bitcoin::hex::HexToArrayError) -> Self {
         AppError(value.into())
     }
 }
@@ -163,7 +175,7 @@ where
 }
 
 fn serialize_runes_map<S>(
-    value: &HashMap<RuneId, u128>,
+    value: &HashMap<String, u128>,
     serializer: S,
 ) -> Result<S::Ok, S::Error>
 where
@@ -386,18 +398,91 @@ pub struct RunesOutputsDTO {
 
 #[derive(Debug, Serialize)]
 pub struct UTXOWithRuneValueDTO {
-    pub txid: Txid,
+    pub txid: String,
     pub vout: u32,
     pub value: u64,
-    #[serde(serialize_with = "serialize_runes_map")]
-    pub runes_value: HashMap<RuneId, u128>,
+    pub runes_value: HashMap<String, String>,
 }
 
 #[derive(Debug, Serialize)]
 pub struct AddressRuneUTXOsDTO {
     pub utxos: Vec<UTXOWithRuneValueDTO>,
-    pub runes: Vec<ExpandRuneEntry>,
+    pub runes: Vec<RuneEntryDTO>,
 }
 
+#[derive(Debug, Serialize)]
+pub struct RuneEntryDTO {
+    pub rune_id: String,
+    pub etching: String,
+    #[serde(serialize_with = "serialize_as_string")]
+    pub number: u64,
+    pub rune: String,
+    pub spaced_rune: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub symbol: Option<String>,
+    pub divisibility: u8,
+    pub premine: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub amount: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cap: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub start_height: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub end_height: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub start_offset: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub end_offset: Option<u32>,
+    pub mints: String,
+    pub turbo: bool,
+    pub burned: String,
+    pub mintable: bool,
+    pub fairmint: bool,
+    pub holders: u32,
+    pub transactions: u32,
+    pub height: u32,
+    pub ts: u32,
+}
 
+impl From<RuneEntryForQueryInsert> for RuneEntryDTO {
+    fn from(value: RuneEntryForQueryInsert) -> Self {
+        RuneEntryDTO {
+            rune_id: value.rune_id,
+            etching: value.etching,
+            number: value.number,
+            rune: value.rune,
+            spaced_rune: value.spaced_rune,
+            symbol: value.symbol,
+            divisibility: value.divisibility,
+            premine: value.premine,
+            amount: value.amount,
+            cap: value.cap,
+            start_height: value.start_height,
+            end_height: value.end_height,
+            start_offset: value.start_offset,
+            end_offset: value.end_offset,
+            mints: value.mints,
+            turbo: value.turbo,
+            burned: value.burned,
+            mintable: value.mintable,
+            fairmint: value.fairmint,
+            holders: value.holders,
+            transactions: value.transactions,
+            height: value.height,
+            ts: value.ts,
+        }
+    }
+}
+
+#[derive(Debug, Default, Serialize)]
+pub struct RuneTx {
+    pub runes: Vec<RuneEntryDTO>,
+    pub actions: Vec<String>,
+    pub inputs: HashMap<u32, HashMap<String, String>>,
+    pub outputs: HashMap<u32, HashMap<String, String>>,
+    pub burned: HashMap<String, String>,
+    pub minted: HashMap<String, String>,
+    pub premine: HashMap<String, String>,
+}
 

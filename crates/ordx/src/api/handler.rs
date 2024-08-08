@@ -1,3 +1,4 @@
+use std::cmp::Ordering;
 use std::collections::{HashMap, HashSet};
 use std::str::FromStr;
 use std::sync::Arc;
@@ -7,14 +8,19 @@ use axum::extract::{Path, Query};
 use axum::response::IntoResponse;
 use bitcoin::{Address, OutPoint, Transaction};
 use bitcoin::psbt::Psbt;
+use bitcoincore_rpc::json::Bip125Replaceable::No;
+use itertools::Itertools;
 use log::info;
+use rusqlite::params;
 use serde_json::{json, Value};
 
 use ordinals::{Artifact, Edict, Rune, RuneId, Runestone, SpacedRune};
 
-use crate::api::dto::{AddressRuneUTXOsDTO, AppError, ExpandRuneEntry, OutputsDTO, Paged, R, RunesPageParams, RunesPSBTParams, RunesTxDTO, RunesTxParams, UTXOWithRuneValueDTO};
+use crate::api::dto::{AddressRuneUTXOsDTO, AppError, ExpandRuneEntry, OutputsDTO, Paged, R, RuneEntryDTO, RunesPageParams, RunesPSBTParams, RunesTxDTO, RunesTxParams, RuneTx, UTXOWithRuneValueDTO};
 use crate::api::util::hex_to_base64;
+use crate::api::vo::RuneBalanceGroupKey;
 use crate::cache::{CacheKey, CacheMethod, MokaCache};
+use crate::db::model::RuneEntryForQueryInsert;
 use crate::db::RunesDB;
 use crate::into_usize::IntoUsize;
 use crate::lot::Lot;
@@ -44,7 +50,7 @@ pub async fn stats(
     let indexed_height = db.latest_indexed_height();
     let latest_height = db.latest_height();
     let remaining_height = latest_height.unwrap_or_default() - indexed_height.unwrap_or_default();
-    let db_size = fs_extra::dir::get_size(db.rocksdb.path())?;
+    let db_size = fs_extra::dir::get_size(db.rocksdb.path().parent().unwrap())?;
     Ok(Json(R::with_data(json!({
         "indexer": {
             "indexed_height": indexed_height,
@@ -71,9 +77,10 @@ pub async fn block_height(
 
 
 pub async fn get_rune_by_id(
+    Extension(cache): Extension<Arc<MokaCache>>,
     Extension(db): Extension<Arc<RunesDB>>,
     Path(id): Path<String>,
-) -> impl IntoResponse {
+) -> anyhow::Result<Json<Option<Value>>, AppError> {
     let rune_id = {
         if let Ok(id) = RuneId::from_str(&id) {
             Some(id)
@@ -85,18 +92,23 @@ pub async fn get_rune_by_id(
             None
         }
     };
-    match rune_id {
-        None => Json(R::with_data(None)),
-        Some(id) => {
-            match db.rune_id_to_rune_entry_get(&id) {
-                None => Json(R::with_data(None)),
-                Some(v) => {
-                    let latest_height = db.latest_height().unwrap_or_default();
-                    Json(R::with_data(Some(ExpandRuneEntry::load(id, v, latest_height))))
-                }
-            }
-        }
+
+    if rune_id.is_none() {
+        return Ok(Json(None));
     }
+
+    let cache_key = CacheKey::new(CacheMethod::HandlerRuneById, Value::String(id.clone()));
+    if let Some(value) = cache.get(&cache_key).await {
+        return Ok(Json(Some(value)));
+    }
+
+    let entry: Option<RuneEntryDTO> = db.sqlite_rune_entry_get_by_id(rune_id.unwrap().to_string()).unwrap_or(None).map(|x| x.into());
+    let r = R::with_data(entry);
+    let value = serde_json::to_value(r)?;
+    let mut cloned = value.clone();
+    cloned["cache"] = Value::Bool(true);
+    cache.insert(cache_key, cloned).await;
+    Ok(Json(Some(value)))
 }
 
 
@@ -331,7 +343,7 @@ fn decode_runes_tx(db: &RunesDB, tx: Transaction) -> anyhow::Result<RunesTxDTO> 
     }
 
     if !burned.is_empty() {
-        actions.insert("burned".to_string());
+        actions.insert("burn".to_string());
     }
 
     if !inputs.is_empty() {
@@ -424,6 +436,138 @@ pub async fn get_runes_by_rune_ids(
     Ok(Json(R::with_data(runes)))
 }
 
+pub async fn get_tx(
+    Extension(cache): Extension<Arc<MokaCache>>,
+    Extension(db): Extension<Arc<RunesDB>>,
+    Path(txid): Path<String>,
+) -> anyhow::Result<Json<Option<Value>>, AppError> {
+    bitcoin::Txid::from_str(&txid)?;
+    let cache_key = CacheKey::new(CacheMethod::HandlerTx, Value::String(txid.clone()));
+    if let Some(value) = cache.get(&cache_key).await {
+        return Ok(Json(Some(value)));
+    }
+
+    let rows = db.sqlite_rune_balance_list_by_txid(&txid)?;
+    let etching_rune_entry = db.sqlite_rune_entry_get_by_etching_txid(&txid)?;
+
+    if rows.is_empty() && etching_rune_entry.is_none() {
+        let r = R::with_data(RuneTx::default());
+        let value = serde_json::to_value(r)?;
+        let mut cloned = value.clone();
+        cloned["cache"] = Value::Bool(true);
+        cache.insert(cache_key, cloned).await;
+        return Ok(Json(Some(value)));
+    }
+
+    if rows.is_empty() && etching_rune_entry.is_some() {
+        let r = R::with_data(RuneTx {
+            runes: vec![etching_rune_entry.unwrap().into()],
+            actions: vec!["etching".into()],
+            inputs: HashMap::new(),
+            outputs: HashMap::new(),
+            burned: HashMap::new(),
+            minted: HashMap::new(),
+            premine: HashMap::new(),
+        });
+        let value = serde_json::to_value(r)?;
+        let mut cloned = value.clone();
+        cloned["cache"] = Value::Bool(true);
+        cache.insert(cache_key, cloned).await;
+        return Ok(Json(Some(value)));
+    }
+
+
+    let mut rune_ids = HashSet::new();
+    let mut inputs_balance_map = HashMap::new();
+    let mut outputs_balance_map = HashMap::new();
+    let mut inputs = HashMap::new();
+    let mut outputs = HashMap::new();
+    let mut actions = HashSet::new();
+    let rows_map = rows.iter().into_group_map_by(|x| RuneBalanceGroupKey {
+        txid: x.txid.clone(),
+        vout: x.vout,
+    });
+    for (k, v) in rows_map {
+        // outputs
+        if k.txid == txid {
+            let mut balance_map = HashMap::new();
+            for e in v {
+                rune_ids.insert(e.rune_id.clone());
+                balance_map.insert(e.rune_id.clone(), e.rune_amount.clone());
+                let x1 = outputs_balance_map.entry(e.rune_id.clone()).or_insert(0);
+                *x1 += e.rune_amount.parse::<u128>().unwrap();
+                e.with_actions(&mut actions);
+            }
+            outputs.insert(k.vout, balance_map);
+        } else {
+            let mut balance_map = HashMap::new();
+            for e in v {
+                rune_ids.insert(e.rune_id.clone());
+                balance_map.insert(e.rune_id.clone(), e.rune_amount.clone());
+                let x1 = inputs_balance_map.entry(e.rune_id.clone()).or_insert(0);
+                *x1 += e.rune_amount.parse::<u128>().unwrap();
+            }
+            inputs.insert(k.vout, balance_map);
+        }
+    }
+
+    let mut burned = HashMap::new();
+    let mut minted = HashMap::new();
+    let mut premine = HashMap::new();
+    for rune_id in rune_ids.iter() {
+        let input = inputs_balance_map.get(rune_id).unwrap_or(&0);
+        let output = outputs_balance_map.get(rune_id).unwrap_or(&0);
+        match input.cmp(output) {
+            Ordering::Less => {
+                match &etching_rune_entry {
+                    None => {
+                        actions.insert("mint".into());
+                        minted.insert(rune_id.clone(), (output - input).to_string());
+                    }
+                    Some(v) => {
+                        if v.rune_id == *rune_id {
+                            actions.insert("premine".into());
+                            premine.insert(rune_id.clone(), (output - input).to_string());
+                        } else {
+                            actions.insert("mint".into());
+                            minted.insert(rune_id.clone(), (output - input).to_string());
+                        }
+                    }
+                }
+            }
+            Ordering::Greater => {
+                burned.insert(rune_id.clone(), (input - output).to_string());
+                actions.insert("burn".into());
+            }
+            _ => {}
+        }
+    }
+
+    if etching_rune_entry.is_some() {
+        actions.insert("etching".into());
+    }
+
+
+    let runes = db.sqlite_rune_entry_list_by_ids(&rune_ids)?.into_iter().map(|x| x.into()).collect();
+
+    let tx = RuneTx {
+        runes,
+        actions: actions.into_iter().collect(),
+        inputs,
+        outputs,
+        burned,
+        minted,
+        premine,
+    };
+
+    let r = R::with_data(tx);
+    let value = serde_json::to_value(r)?;
+    let mut cloned = value.clone();
+    cloned["cache"] = Value::Bool(true);
+    cache.insert(cache_key, cloned).await;
+    Ok(Json(Some(value)))
+}
+
 pub async fn address_runes_utxos(
     Extension(cache): Extension<Arc<MokaCache>>,
     Extension(db): Extension<Arc<RunesDB>>,
@@ -435,36 +579,27 @@ pub async fn address_runes_utxos(
         return Ok(Json(value));
     }
 
-    let conn = db.sqlite.get()?;
-    
-    let address = Address::from_str(&address_string)?.assume_checked();
-    let spk = address.script_pubkey();
-    // let entries = db.spk_to_rune_balance_entries(&spk);
-    let mut runes_set = HashSet::new();
+    let unspent = db.sqlite_rune_balance_list_unspent_by_address(&address_string)?;
+    let mut rune_ids = HashSet::new();
+    let unspent_map = unspent.iter().into_group_map_by(|x| RuneBalanceGroupKey {
+        txid: x.txid.clone(),
+        vout: x.vout,
+    });
     let mut utxos = vec![];
-    // for (outpoint, entry) in entries {
-    //     let balances_buffer = entry;
-    //     let mut i = 0;
-    //     let mut balance_map = HashMap::new();
-    //     while i < balances_buffer.len() {
-    //         let ((id, balance), length) = RuneUpdater::decode_rune_balance(&balances_buffer[i..])?;
-    //         i += length;
-    //         balance_map.insert(id, balance);
-    //         runes_set.insert(id);
-    //     }
-    //     utxos.push(UTXOWithRuneValueDTO {
-    //         txid: outpoint.txid,
-    //         vout: outpoint.vout,
-    //         value: entry.2,
-    //         runes_value: balance_map,
-    //     });
-    // }
-    let latest_height = db.latest_height().unwrap_or_default();
-    let mut runes = vec![];
-    for x in runes_set {
-        let r = db.rune_id_to_rune_entry_get(&x).unwrap();
-        runes.push(ExpandRuneEntry::load(x, r, latest_height));
+    for (k, v) in unspent_map.iter() {
+        let mut balance_map = HashMap::new();
+        for e in v {
+            rune_ids.insert(e.rune_id.clone());
+            balance_map.insert(e.rune_id.clone(), e.rune_amount.clone());
+        }
+        utxos.push(UTXOWithRuneValueDTO {
+            txid: k.txid.clone(),
+            vout: k.vout,
+            value: v.first().unwrap().value,
+            runes_value: balance_map,
+        });
     }
+    let runes = db.sqlite_rune_entry_list_by_ids(&rune_ids)?.into_iter().map(|x| x.into()).collect();
     let r = R::with_data(AddressRuneUTXOsDTO { utxos, runes });
     let value = serde_json::to_value(r)?;
     let mut cloned = value.clone();

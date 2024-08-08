@@ -52,42 +52,62 @@ pub enum RuneOpType {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RuneBalanceForQuery {
     pub id: u32,
-    pub tx_height: u32,
-    pub tx_index: u32,
-    pub txid: String,
-    pub vout: u32,
-    pub value: Option<u64>,
-    pub rune_id: String,
-    pub rune_amount: String,
-    pub address: String,
-    pub height: u32,
-    pub ts: u32,
-    pub premine: bool,
-    pub mint: bool,
-    pub burn: bool,
-    pub cenotaph: bool,
-    pub transfer: bool,
-    pub spent_height: u32,
-    pub spent_txid: Option<String>,
-    pub spent_vin: Option<u32>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct RuneBalanceForInsert {
-    pub height: u32,
-    pub idx: u32,
     pub txid: String,
     pub vout: u32,
     pub value: u64,
     pub rune_id: String,
     pub rune_amount: String,
     pub address: String,
-    pub ts: u32,
     pub premine: bool,
     pub mint: bool,
     pub burn: bool,
     pub cenotaph: bool,
     pub transfer: bool,
+    pub height: u32,
+    pub idx: u32,
+    pub ts: u32,
+    pub spent_height: u32,
+    pub spent_txid: Option<String>,
+    pub spent_vin: Option<u32>,
+    pub spent_ts: Option<u32>,
+}
+
+impl RuneBalanceForQuery {
+    pub fn with_actions(&self, actions: &mut HashSet<String>) {
+        if self.premine {
+            actions.insert("premine".into());
+        }
+        if self.mint {
+            actions.insert("mint".into());
+        }
+        if self.burn {
+            actions.insert("burned".into());
+        }
+        if self.cenotaph {
+            actions.insert("cenotaph".into());
+        }
+        if self.transfer {
+            actions.insert("transfer".into());
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RuneBalanceForInsert {
+    pub txid: String,
+    pub vout: u32,
+    pub value: u64,
+    pub rune_id: String,
+    pub rune_amount: String,
+    pub address: String,
+    pub premine: bool,
+    pub mint: bool,
+    pub burn: bool,
+    pub cenotaph: bool,
+    pub transfer: bool,
+    pub height: u32,
+    pub idx: u32,
+    pub ts: u32,
     pub spent_height: u32,
     pub spent_txid: Option<String>,
     pub spent_vin: Option<u32>,
@@ -103,6 +123,14 @@ pub struct RuneBalanceForUpdate {
     pub spent_txid: String,
     pub spent_vin: u32,
     pub spent_ts: u32,
+}
+
+pub struct RuneEntryCompatPageParams{
+    pub offset: u64,
+    pub limit: u64,
+    pub mint_type: Option<String>,
+    pub search: Option<String>,
+    pub sort: Option<String>,
 }
 
 

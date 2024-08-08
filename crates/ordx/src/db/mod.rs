@@ -1,20 +1,22 @@
 use std::collections::{HashMap, HashSet};
 use std::fmt::Debug;
 use std::path::Path;
+use std::str::FromStr;
 use std::time::Instant;
 
 use bitcoin::block::Header;
 use bitcoin::OutPoint;
+use itertools::Itertools;
 use log::info;
 use r2d2::{CustomizeConnection, Pool};
 use r2d2_sqlite::SqliteConnectionManager;
 use rocksdb::{ColumnFamily, ColumnFamilyDescriptor, DB, Error, IteratorMode, Options, WriteBatch};
-use rusqlite::{Connection, params, params_from_iter, ToSql};
+use rusqlite::{Connection, params, params_from_iter, Row, ToSql};
 use rusqlite::types::ToSqlOutput;
 
 use ordinals::{Rune, RuneId};
 
-use crate::db::model::{RuneBalanceForInsert, RuneBalanceForTemp, RuneBalanceForUpdate, RuneEntryForQueryInsert, RuneEntryForTemp, RuneEntryForUpdate};
+use crate::db::model::{RuneBalanceForInsert, RuneBalanceForQuery, RuneBalanceForTemp, RuneBalanceForUpdate, RuneEntryCompatPageParams, RuneEntryForQueryInsert, RuneEntryForTemp, RuneEntryForUpdate};
 use crate::entry::{Entry, EntryBytes, RuneBalanceEntry, RuneEntry, Statistic};
 use crate::updater::REORG_DEPTH;
 
@@ -569,19 +571,19 @@ impl RunesDB {
         let mut changed = 0;
         let mut changed_rune_ids = HashSet::new();
         for x in iter {
-            let (tk, _) = x.unwrap();
+            let (tk, _) = x?;
             let h = u32::from_be_bytes([tk[0], tk[1], tk[2], tk[3]]);
             if h >= height {
                 batch.delete_cf(temp_cf, &tk);
                 let k = &tk[4..];
-                let v = self.rocksdb.get_cf(otrb_cf, k).unwrap().unwrap();
-                let confirmed_height = u32::from_le_bytes(v[0..4].try_into().unwrap());
+                let v = self.rocksdb.get_cf(otrb_cf, k)?.unwrap();
+                let confirmed_height = u32::from_le_bytes(v[0..4].try_into()?);
                 if confirmed_height >= height {
                     batch.delete_cf(otrb_cf, k);
                     deleted += 1;
                     continue;
                 }
-                let spent_height = u32::from_le_bytes(v[4..8].try_into().unwrap());
+                let spent_height = u32::from_le_bytes(v[4..8].try_into()?);
                 if spent_height >= height {
                     let mut entry = RuneBalanceEntry::load_bytes(&v);
                     entry.1 = 0;
@@ -954,5 +956,135 @@ impl RunesDB {
         }
 
         Ok(())
+    }
+
+
+    pub fn sqlite_rune_entry_get_by_id(&self, rune_id: String) -> anyhow::Result<Option<RuneEntryForQueryInsert>> {
+        let conn = self.sqlite.get()?;
+        let mut stmt = conn.prepare_cached(
+            // language=sqlite
+            "SELECT * FROM rune_entry WHERE rune_id = ?"
+        )?;
+        let entry = stmt.query_row(params![rune_id], |row| {
+            Self::rune_entry_to_for_query(row)
+        }).ok();
+        Ok(entry)
+    }
+
+    pub fn sqlite_rune_entry_get_by_etching_txid(&self, txid: &String) -> anyhow::Result<Option<RuneEntryForQueryInsert>> {
+        let conn = self.sqlite.get()?;
+        let mut stmt = conn.prepare_cached(
+            // language=sqlite
+            "SELECT * FROM rune_entry WHERE etching = ?"
+        )?;
+        let entry = stmt.query_row(params![txid], |row| {
+            Self::rune_entry_to_for_query(row)
+        }).ok();
+        Ok(entry)
+    }
+
+    fn rune_entry_to_for_query(row: &Row) -> Result<RuneEntryForQueryInsert, rusqlite::Error> {
+        Ok(RuneEntryForQueryInsert {
+            rune_id: row.get("rune_id")?,
+            etching: row.get("etching")?,
+            number: row.get("number")?,
+            rune: row.get("rune")?,
+            spaced_rune: row.get("spaced_rune")?,
+            symbol: row.get("symbol")?,
+            divisibility: row.get("divisibility")?,
+            premine: row.get("premine")?,
+            amount: row.get("amount")?,
+            cap: row.get("cap")?,
+            start_height: row.get("start_height")?,
+            end_height: row.get("end_height")?,
+            start_offset: row.get("start_offset")?,
+            end_offset: row.get("end_offset")?,
+            turbo: row.get("turbo")?,
+            fairmint: row.get("fairmint")?,
+            height: row.get("height")?,
+            ts: row.get("ts")?,
+            mints: row.get("mints")?,
+            burned: row.get("burned")?,
+            mintable: row.get("mintable")?,
+            holders: row.get("holders")?,
+            transactions: row.get("transactions")?,
+        })
+    }
+
+    pub fn sqlite_rune_entry_list_for_compat(&self, params: &RuneEntryCompatPageParams) -> anyhow::Result<Vec<RuneEntryForQueryInsert>> {
+        let conn = self.sqlite.get()?;
+        let mut sql = "SELECT * FROM rune_entry".to_string();
+        
+        
+        
+        sql.push_str(" order by");
+        let mut stmt = conn.prepare_cached(
+            // language=sqlite
+            "SELECT * FROM rune_entry"
+        )?;
+        let entries = stmt.query_map([], |row| {
+            Self::rune_entry_to_for_query(row)
+        })?.map(|x| x.unwrap()).collect();
+        Ok(entries)
+    }
+
+    pub fn sqlite_rune_entry_list_by_ids(&self, rune_ids: &HashSet<String>) -> anyhow::Result<Vec<RuneEntryForQueryInsert>> {
+        let conn = self.sqlite.get()?;
+        let placeholders = rune_ids.iter().map(|_| "?").collect::<Vec<&str>>().join(",");
+        let mut stmt = conn.prepare_cached(
+            &format!("SELECT * FROM rune_entry WHERE rune_id in ({})", placeholders)
+        )?;
+        let entries = stmt.query_map(params_from_iter(rune_ids.iter()), |row| {
+            Self::rune_entry_to_for_query(row)
+        })?.map(|x| x.unwrap()).collect();
+        Ok(entries)
+    }
+
+    pub fn sqlite_rune_balance_list_by_txid(&self, txid: &String) -> anyhow::Result<Vec<RuneBalanceForQuery>> {
+        let conn = self.sqlite.get()?;
+        let mut stmt = conn.prepare_cached(
+            // language=sqlite
+            "SELECT * FROM rune_balance WHERE txid = ? or spent_txid = ?"
+        )?;
+        let entries = stmt.query_map(params![txid, txid], |row| {
+            Self::rune_balance_to_for_query(row)
+        })?.map(|x| x.unwrap()).collect();
+        Ok(entries)
+    }
+
+    pub fn sqlite_rune_balance_list_unspent_by_address(&self, address: &String) -> anyhow::Result<Vec<RuneBalanceForQuery>> {
+        let conn = self.sqlite.get()?;
+        let mut stmt = conn.prepare_cached(
+            // language=sqlite
+            "SELECT * FROM rune_balance WHERE address = ? and spent_height = 0"
+        )?;
+        let entries = stmt.query_map(params![address], |row| {
+            Self::rune_balance_to_for_query(row)
+        })?.map(|x| x.unwrap()).collect();
+        Ok(entries)
+    }
+
+    fn rune_balance_to_for_query(row: &Row) -> Result<RuneBalanceForQuery, rusqlite::Error> {
+        Ok(RuneBalanceForQuery {
+            id: row.get("id")?,
+            txid: row.get("txid")?,
+            vout: row.get("vout")?,
+            value: row.get("value")?,
+            rune_id: row.get("rune_id")?,
+            rune_amount: row.get("rune_amount")?,
+            address: row.get("address")?,
+            premine: row.get("premine")?,
+            mint: row.get("mint")?,
+            burn: row.get("burn")?,
+            cenotaph: row.get("cenotaph")?,
+            transfer: row.get("transfer")?,
+            height: row.get("height")?,
+            idx: row.get("idx")?,
+            ts: row.get("ts")?,
+            spent_height: row.get("spent_height")?,
+            spent_ts: row.get("spent_ts")?,
+            spent_txid: row.get("spent_txid")?,
+            spent_vin: row.get("spent_vin")?,
+        })
     }
 }

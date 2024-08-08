@@ -27,6 +27,8 @@ CREATE TABLE IF NOT EXISTS rune_entry
 
 CREATE INDEX IF NOT EXISTS idx_rune ON rune_entry (rune);
 CREATE INDEX IF NOT EXISTS idx_spaced_rune ON rune_entry (spaced_rune);
+CREATE INDEX IF NOT EXISTS idx_etching ON rune_entry (etching);
+CREATE INDEX IF NOT EXISTS idx_fairmint ON rune_entry (fairmint);
 
 CREATE TABLE IF NOT EXISTS rune_balance
 (
