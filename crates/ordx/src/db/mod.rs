@@ -1,18 +1,16 @@
 use std::collections::{HashMap, HashSet};
 use std::fmt::Debug;
 use std::path::Path;
-use std::str::FromStr;
 use std::time::Instant;
 
 use bitcoin::block::Header;
 use bitcoin::OutPoint;
-use itertools::Itertools;
 use log::info;
 use r2d2::{CustomizeConnection, Pool};
 use r2d2_sqlite::SqliteConnectionManager;
-use rocksdb::{ColumnFamily, ColumnFamilyDescriptor, DB, Error, IteratorMode, Options, WriteBatch};
-use rusqlite::{Connection, params, params_from_iter, Row, ToSql};
+use rocksdb::{ColumnFamily, ColumnFamilyDescriptor, Error, IteratorMode, Options, WriteBatch, DB};
 use rusqlite::types::ToSqlOutput;
+use rusqlite::{params, params_from_iter, Connection, Row, ToSql};
 
 use ordinals::{Rune, RuneId};
 
@@ -571,7 +569,7 @@ impl RunesDB {
         let mut changed = 0;
         let mut changed_rune_ids = HashSet::new();
         for x in iter {
-            let (tk, _) = x?;
+            let (tk, tv) = x?;
             let h = u32::from_be_bytes([tk[0], tk[1], tk[2], tk[3]]);
             if h >= height {
                 batch.delete_cf(temp_cf, &tk);
@@ -589,7 +587,7 @@ impl RunesDB {
                     entry.1 = 0;
                     batch.put_cf(otrb_cf, k, &entry.store_bytes());
                     changed += 1;
-                    v.chunks(12).for_each(|x| {
+                    tv.chunks(12).for_each(|x| {
                         let rune_id = RuneId::load_bytes(x);
                         changed_rune_ids.insert(rune_id);
                     });
@@ -600,7 +598,7 @@ impl RunesDB {
         }
         info!("<= OUTPOINT_TO_RUNE_BALANCES deleted: {}, changed: {}", deleted, changed);
 
-        self.rocksdb.write(batch).unwrap();
+        self.rocksdb.write(batch)?;
 
         info!("Write stage 1 done.");
 
@@ -1014,9 +1012,8 @@ impl RunesDB {
     pub fn sqlite_rune_entry_list_for_compat(&self, params: &RuneEntryCompatPageParams) -> anyhow::Result<Vec<RuneEntryForQueryInsert>> {
         let conn = self.sqlite.get()?;
         let mut sql = "SELECT * FROM rune_entry".to_string();
-        
-        
-        
+
+
         sql.push_str(" order by");
         let mut stmt = conn.prepare_cached(
             // language=sqlite

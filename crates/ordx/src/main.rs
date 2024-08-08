@@ -1,13 +1,13 @@
 use std::cmp::max;
-use std::collections::{HashMap, HashSet};
-use std::sync::Arc;
+use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
+use std::sync::Arc;
 use std::thread;
 use std::time::{Duration, Instant};
 
-use bitcoin::{OutPoint, Txid};
 use bitcoin::constants::SUBSIDY_HALVING_INTERVAL;
 use bitcoin::hashes::Hash;
+use bitcoin::Txid;
 use bitcoincore_rpc::RpcApi;
 use log::{info, warn};
 
@@ -35,7 +35,7 @@ async fn main() -> anyhow::Result<()> {
     let settings = Arc::new(Settings::load());
     env_logger::init();
     info!("{}", &settings);
-    let (rpc_client, chain) = create_bitcoincore_rpc_client(settings.clone()).unwrap();
+    let (rpc_client, chain) = create_bitcoincore_rpc_client(settings.clone())?;
 
     let db_path = chain.join_with_data_dir(settings.data_dir.clone().unwrap_or("./data".to_string()).as_str());
     let runes_db = Arc::new(RunesDB::new(db_path));
@@ -201,9 +201,9 @@ async fn main() -> anyhow::Result<()> {
                     rune_balance_temp: &mut rune_balance_temp,
                 };
                 for (i, tx) in block.txdata.iter().enumerate() {
-                    rune_updater.index_runes(u32::try_from(i).unwrap(), tx).await.unwrap();
+                    rune_updater.index_runes(u32::try_from(i)?, tx).await?;
                 }
-                rune_updater.update().unwrap();
+                rune_updater.update()?;
                 let runes_num_total = rune_updater.runes_num();
 
                 let changed_count = runes_num_total - runes_num_before;
